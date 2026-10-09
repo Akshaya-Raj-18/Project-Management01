@@ -1,0 +1,16 @@
+# Compiled class files
+bin/
+*.class
+
+# IDE and OS files
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Database temporary journals
+*.db-journal
+
+# Keep libraries and source
+!lib/*.jar
