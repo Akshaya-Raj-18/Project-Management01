@@ -268,6 +268,8 @@ public class ProjectManagementSystem {
 
         public abstract boolean hasPermission(Permission permission);
         public abstract String getRoleDescription();
+        public abstract String getDepartment();
+        public abstract void setDepartment(String d);
 
         public String getProfileBadgeText() {
             return fullName + " (" + username + ") | " + getRoleDescription();
@@ -300,13 +302,13 @@ public class ProjectManagementSystem {
         public SuperAdmin(Integer id, String username, String password, String fullName, String email, String dept) {
             super(id, username, password, fullName, email, UserRole.SUPER_ADMIN);
             AppLogger.log(LogLevel.DEBUG, "[Constructor Chaining] SuperAdmin constructor initialized: %s", username);
-            this.department = dept;
+            this.department = (dept != null && !dept.trim().isEmpty()) ? dept : "Executive Governance";
         }
 
         @Override public boolean hasPermission(Permission permission) { return true; }
         @Override public String getRoleDescription() { return "Super Administrator (Root Authority & Audit Access)"; }
-        public String getDepartment() { return department; }
-        public void setDepartment(String d) { this.department = d; }
+        @Override public String getDepartment() { return department != null ? department : "Executive Governance"; }
+        @Override public void setDepartment(String d) { this.department = d; }
     }
 
     public static class Manager extends User {
@@ -316,7 +318,7 @@ public class ProjectManagementSystem {
         public Manager(Integer id, String username, String password, String fullName, String email, String dept, double limit) {
             super(id, username, password, fullName, email, UserRole.MANAGER);
             AppLogger.log(LogLevel.DEBUG, "[Constructor Chaining] Manager constructor initialized: %s", username);
-            this.department = dept;
+            this.department = (dept != null && !dept.trim().isEmpty()) ? dept : "Engineering Management";
             this.budgetApprovalLimit = limit;
         }
 
@@ -325,20 +327,20 @@ public class ProjectManagementSystem {
             return true;
         }
         @Override public String getRoleDescription() { return "Project Manager / Admin (Executive & Audit Access)"; }
-        public String getDepartment() { return department; }
-        public void setDepartment(String d) { this.department = d; }
+        @Override public String getDepartment() { return department != null ? department : "Engineering Management"; }
+        @Override public void setDepartment(String d) { this.department = d; }
         public double getBudgetApprovalLimit() { return budgetApprovalLimit; }
         public void setBudgetApprovalLimit(double l) { this.budgetApprovalLimit = l; }
     }
 
     public static class Developer extends User {
-        private String techStack;
+        private String department;
         private double hourlyRate;
 
-        public Developer(Integer id, String username, String password, String fullName, String email, String stack, double rate) {
+        public Developer(Integer id, String username, String password, String fullName, String email, String dept, double rate) {
             super(id, username, password, fullName, email, UserRole.DEVELOPER);
             AppLogger.log(LogLevel.DEBUG, "[Constructor Chaining] Developer constructor initialized: %s", username);
-            this.techStack = stack;
+            this.department = (dept != null && !dept.trim().isEmpty()) ? dept : "Frontend Team";
             this.hourlyRate = rate;
         }
 
@@ -355,8 +357,10 @@ public class ProjectManagementSystem {
         }
 
         @Override public String getRoleDescription() { return "Software Developer / User (Execution & Logging)"; }
-        public String getTechStack() { return techStack; }
-        public void setTechStack(String s) { this.techStack = s; }
+        @Override public String getDepartment() { return department != null ? department : "Frontend Team"; }
+        @Override public void setDepartment(String d) { this.department = d; }
+        public String getTechStack() { return department; }
+        public void setTechStack(String s) { this.department = s; }
         public double getHourlyRate() { return hourlyRate; }
         public void setHourlyRate(double r) { this.hourlyRate = r; }
     }
@@ -924,9 +928,9 @@ public class ProjectManagementSystem {
             workLogs.clear();
             userTable.add(new SuperAdmin(1, "superadmin", "superadmin123", "Chief Administrator", "superadmin@enterprise.com", "Executive Governance"));
             userTable.add(new Manager(2, "admin", "admin123", "Dr. Arun Kumar (Manager)", "admin@enterprise.com", "Engineering Directorate", 1000000.0));
-            userTable.add(new Developer(3, "user", "user1234", "Standard User (Developer)", "user@tech.io", "Java 21, Spring Boot, MySQL", 70.0));
-            userTable.add(new Developer(4, "dev_alice", "alice123", "Alice George (Developer)", "alice@tech.io", "Java 21, Swing, Spring Boot", 75.0));
-            userTable.add(new Developer(5, "dev_bob", "bob12345", "Bob Varghese (Developer)", "bob@cloud.io", "Java, Microservices, SQLite", 65.0));
+            userTable.add(new Developer(3, "user", "user1234", "Standard User (Developer)", "user@tech.io", "Frontend Team", 70.0));
+            userTable.add(new Developer(4, "dev_alice", "alice123", "Alice George (Developer)", "alice@tech.io", "Backend Team", 75.0));
+            userTable.add(new Developer(5, "dev_bob", "bob12345", "Bob Varghese (Developer)", "bob@cloud.io", "DevOps & Cloud Team", 65.0));
             userIdSequence = 6;
             seedDefaultTeams();
             projectIdSequence = 1;
@@ -947,17 +951,12 @@ public class ProjectManagementSystem {
                         ps.setString(4, u.getFullName());
                         ps.setString(5, u.getEmail());
                         ps.setString(6, u.getRole().name());
-                        if (u instanceof SuperAdmin) {
-                            ps.setString(7, ((SuperAdmin) u).getDepartment());
-                            ps.setDouble(8, 0.0);
-                        } else if (u instanceof Manager) {
-                            ps.setString(7, ((Manager) u).getDepartment());
+                        ps.setString(7, u.getDepartment());
+                        if (u instanceof Manager) {
                             ps.setDouble(8, ((Manager) u).getBudgetApprovalLimit());
                         } else if (u instanceof Developer) {
-                            ps.setString(7, ((Developer) u).getTechStack());
                             ps.setDouble(8, ((Developer) u).getHourlyRate());
                         } else {
-                            ps.setString(7, "-");
                             ps.setDouble(8, 0.0);
                         }
                         ps.executeUpdate();
@@ -987,7 +986,7 @@ public class ProjectManagementSystem {
                     } else if ("MANAGER".equalsIgnoreCase(roleStr)) {
                         userTable.add(new Manager(id, un, pw, fn, em, extra != null ? extra : "Engineering Management", metric));
                     } else {
-                        userTable.add(new Developer(id, un, pw, fn, em, extra != null ? extra : "Java, Spring Boot", metric));
+                        userTable.add(new Developer(id, un, pw, fn, em, extra != null ? extra : "Frontend Team", metric));
                     }
                     if (id > maxId) maxId = id;
                 }
@@ -1285,17 +1284,12 @@ public class ProjectManagementSystem {
                         ps.setString(4, u.getFullName());
                         ps.setString(5, u.getEmail());
                         ps.setString(6, u.getRole().name());
-                        if (u instanceof SuperAdmin) {
-                            ps.setString(7, ((SuperAdmin) u).getDepartment());
-                            ps.setDouble(8, 0.0);
-                        } else if (u instanceof Manager) {
-                            ps.setString(7, ((Manager) u).getDepartment());
+                        ps.setString(7, u.getDepartment());
+                        if (u instanceof Manager) {
                             ps.setDouble(8, ((Manager) u).getBudgetApprovalLimit());
                         } else if (u instanceof Developer) {
-                            ps.setString(7, ((Developer) u).getTechStack());
                             ps.setDouble(8, ((Developer) u).getHourlyRate());
                         } else {
-                            ps.setString(7, "-");
                             ps.setDouble(8, 0.0);
                         }
                         ps.executeUpdate();
@@ -2288,16 +2282,10 @@ public class ProjectManagementSystem {
         private final User userToEdit;
 
         private JComboBox<String> cmbRole = new JComboBox<>();
-        private JComboBox<String> cmbTeamSelect = new JComboBox<>();
+        private JComboBox<String> cmbDepartment = new JComboBox<>();
         private JTextField txtFullName = new JTextField(20);
         private JTextField txtUsername = new JTextField(20);
         private JPasswordField txtPassword = new JPasswordField(20);
-        private JTextField txtEmail = new JTextField(20);
-        private JTextField txtSpec = new JTextField("Java, Swing, JDBC", 20); // Dept or TechStack
-        private JTextField txtMetric = new JTextField("60.0", 20); // Hourly Rate or Budget Limit
-
-        private JLabel lblSpec = new JLabel("Primary Tech Stack: *");
-        private JLabel lblMetric = new JLabel("Hourly Billing Rate ($): *");
 
         private final User currentUser;
 
@@ -2307,7 +2295,7 @@ public class ProjectManagementSystem {
 
         public AddTeamMemberDialog(Frame parent, DatabaseManager db, User currentUser, User userToEdit) {
             super(parent, userToEdit != null ? ("Edit Account: " + userToEdit.getFullName())
-                    : ((currentUser != null && currentUser.hasPermission(Permission.MANAGE_ADMINS)) ? "Register New Account / Administrator" : "Register New Software Developer"), true);
+                    : ((currentUser != null && currentUser.hasPermission(Permission.MANAGE_ADMINS)) ? "Register New Account / Administrator" : "Register New Team Member"), true);
             this.currentUser = currentUser;
             this.userToEdit = userToEdit;
             setLayout(new BorderLayout());
@@ -2315,7 +2303,7 @@ public class ProjectManagementSystem {
 
             JPanel header = new JPanel(new FlowLayout(FlowLayout.LEFT, 15, 12));
             header.setBackground(UITheme.PRIMARY);
-            JLabel lblH = new JLabel(userToEdit != null ? "Edit User Account & Role Profile" : "Register New Team Member");
+            JLabel lblH = new JLabel(userToEdit != null ? "Edit User Account Profile" : "Register New Team Member");
             lblH.setFont(UITheme.FONT_SECTION);
             lblH.setForeground(Color.WHITE);
             header.add(lblH);
@@ -2323,10 +2311,10 @@ public class ProjectManagementSystem {
 
             JPanel form = new JPanel(new GridBagLayout());
             form.setBackground(Color.WHITE);
-            form.setBorder(BorderFactory.createEmptyBorder(15, 20, 15, 20));
+            form.setBorder(BorderFactory.createEmptyBorder(18, 20, 18, 20));
 
             GridBagConstraints g = new GridBagConstraints();
-            g.insets = new Insets(5, 5, 5, 5);
+            g.insets = new Insets(6, 6, 6, 6);
             g.fill = GridBagConstraints.HORIZONTAL;
 
             if (userToEdit != null && userToEdit.getRole() == UserRole.SUPER_ADMIN) {
@@ -2339,42 +2327,31 @@ public class ProjectManagementSystem {
                 cmbRole.addItem("Software Developer / User");
             }
 
-            for (Team tm : db.getTeams()) cmbTeamSelect.addItem(tm.getName());
-            if (cmbTeamSelect.getItemCount() == 0) cmbTeamSelect.addItem("General Team");
-
-            cmbRole.addActionListener(e -> updateRoleLabels());
+            for (Team tm : db.getTeams()) cmbDepartment.addItem(tm.getName());
+            if (cmbDepartment.getItemCount() == 0) cmbDepartment.addItem("General Team");
+            cmbDepartment.setEditable(true);
 
             int row = 0;
-            addRow(form, g, row++, "Account Role: *", cmbRole);
-            addRow(form, g, row++, "Functional Team: *", cmbTeamSelect);
             addRow(form, g, row++, "Full Name: *", txtFullName);
             addRow(form, g, row++, "Unique Username: *", txtUsername);
             addRow(form, g, row++, "Password (min 8 chars): *", txtPassword);
-            addRow(form, g, row++, "Email Address (valid format): *", txtEmail);
-            addRow(form, g, row++, lblSpec.getText(), txtSpec);
-            addRow(form, g, row++, lblMetric.getText(), txtMetric);
+            addRow(form, g, row++, "Account Role: *", cmbRole);
+            addRow(form, g, row++, "Department / Team: *", cmbDepartment);
 
             // Pre-populate if editing an existing user
             if (userToEdit != null) {
                 txtFullName.setText(userToEdit.getFullName());
                 txtUsername.setText(userToEdit.getUsername());
                 txtPassword.setText(userToEdit.getPassword());
-                txtEmail.setText(userToEdit.getEmail());
+                cmbDepartment.setSelectedItem(userToEdit.getDepartment());
 
                 if (userToEdit instanceof SuperAdmin) {
-                    txtSpec.setText(((SuperAdmin) userToEdit).getDepartment());
-                    txtMetric.setText("0.0");
-                    txtMetric.setEnabled(false);
+                    cmbRole.setSelectedItem("Super Administrator");
                 } else if (userToEdit instanceof Manager) {
                     cmbRole.setSelectedItem("Project Manager / Admin");
-                    txtSpec.setText(((Manager) userToEdit).getDepartment());
-                    txtMetric.setText(String.valueOf(((Manager) userToEdit).getBudgetApprovalLimit()));
                 } else if (userToEdit instanceof Developer) {
                     cmbRole.setSelectedItem("Software Developer / User");
-                    txtSpec.setText(((Developer) userToEdit).getTechStack());
-                    txtMetric.setText(String.valueOf(((Developer) userToEdit).getHourlyRate()));
                 }
-                updateRoleLabels();
             }
 
             add(form, BorderLayout.CENTER);
@@ -2390,11 +2367,11 @@ public class ProjectManagementSystem {
                 String fn = txtFullName.getText().trim();
                 String un = txtUsername.getText().trim();
                 String pw = new String(txtPassword.getPassword());
-                String em = txtEmail.getText().trim();
-                String spec = txtSpec.getText().trim();
+                Object deptObj = cmbDepartment.getSelectedItem();
+                String dept = (deptObj != null) ? deptObj.toString().trim() : "";
 
-                if (fn.isEmpty() || un.isEmpty() || pw.isEmpty() || em.isEmpty() || spec.isEmpty()) {
-                    JOptionPane.showMessageDialog(this, "Please fill in all mandatory fields.", "Validation Error", JOptionPane.WARNING_MESSAGE);
+                if (fn.isEmpty() || un.isEmpty() || pw.isEmpty() || dept.isEmpty()) {
+                    JOptionPane.showMessageDialog(this, "Please fill in all required fields (Name, Username, Password, Department).", "Validation Error", JOptionPane.WARNING_MESSAGE);
                     return;
                 }
 
@@ -2403,35 +2380,29 @@ public class ProjectManagementSystem {
                     return;
                 }
 
-                if (!em.matches("^[A-Za-z0-9+_.-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$")) {
-                    JOptionPane.showMessageDialog(this, "Please enter a valid email address (e.g., user@domain.com).", "Validation Error", JOptionPane.WARNING_MESSAGE);
-                    return;
-                }
-
-                boolean unChanged = (userToEdit == null) || !un.equalsIgnoreCase(userToEdit.getUsername());
-                if (unChanged && db.isUsernameTaken(un)) {
+                boolean unChanged = (userToEdit != null) && un.equalsIgnoreCase(userToEdit.getUsername());
+                if (!unChanged && db.isUsernameTaken(un)) {
                     JOptionPane.showMessageDialog(this, "Username '" + un + "' is already taken! Choose another.", "Duplicate Username", JOptionPane.WARNING_MESSAGE);
                     return;
                 }
 
-                double metricVal = 0.0;
-                if (!(userToEdit instanceof SuperAdmin)) {
-                    try {
-                        metricVal = Double.parseDouble(txtMetric.getText().trim());
-                        if (metricVal < 0) throw new NumberFormatException();
-                    } catch (NumberFormatException ex) {
-                        JOptionPane.showMessageDialog(this, "Please enter a valid positive numeric rate or budget.", "Validation Error", JOptionPane.WARNING_MESSAGE);
-                        return;
-                    }
+                // Auto-register team if typed department doesn't exist yet
+                if (db.getTeams().stream().noneMatch(t -> t.getName().equalsIgnoreCase(dept))) {
+                    db.saveTeam(new Team(dept, "Functional department for " + dept));
                 }
+
+                String em = (userToEdit != null && userToEdit.getEmail() != null && !userToEdit.getEmail().isEmpty())
+                        ? userToEdit.getEmail() : (un.toLowerCase() + "@enterprise.com");
 
                 Integer targetId = userToEdit != null ? userToEdit.getId() : null;
                 if (userToEdit instanceof SuperAdmin) {
-                    createdUser = new SuperAdmin(targetId, un, pw, fn, em, spec);
+                    createdUser = new SuperAdmin(targetId, un, pw, fn, em, dept);
                 } else if ("Project Manager / Admin".equals(cmbRole.getSelectedItem())) {
-                    createdUser = new Manager(targetId, un, pw, fn, em, spec, metricVal);
+                    double limit = (userToEdit instanceof Manager) ? ((Manager) userToEdit).getBudgetApprovalLimit() : 500000.0;
+                    createdUser = new Manager(targetId, un, pw, fn, em, dept, limit);
                 } else {
-                    createdUser = new Developer(targetId, un, pw, fn, em, spec, metricVal);
+                    double rate = (userToEdit instanceof Developer) ? ((Developer) userToEdit).getHourlyRate() : 70.0;
+                    createdUser = new Developer(targetId, un, pw, fn, em, dept, rate);
                 }
                 saved = true;
                 dispose();
@@ -2444,22 +2415,6 @@ public class ProjectManagementSystem {
             pack();
             setLocationRelativeTo(parent);
             setResizable(false);
-        }
-
-        private void updateRoleLabels() {
-            if ("Project Manager / Admin".equals(cmbRole.getSelectedItem())) {
-                lblSpec.setText("Assigned Department: *");
-                lblMetric.setText("Budget Approval Limit ($): *");
-                txtMetric.setEnabled(true);
-            } else if ("Super Administrator".equals(cmbRole.getSelectedItem())) {
-                lblSpec.setText("Assigned Department: *");
-                lblMetric.setText("Authority Level:");
-                txtMetric.setEnabled(false);
-            } else {
-                lblSpec.setText("Primary Tech Stack: *");
-                lblMetric.setText("Hourly Billing Rate ($): *");
-                txtMetric.setEnabled(true);
-            }
         }
 
         private void addRow(JPanel p, GridBagConstraints g, int row, String label, JComponent comp) {
@@ -2881,6 +2836,12 @@ public class ProjectManagementSystem {
             cmbProjectFilter.setFont(UITheme.FONT_REGULAR);
             cmbProjectFilter.addActionListener(e -> applyTaskFilter());
             filterArea.add(cmbProjectFilter);
+
+            filterArea.add(new JLabel("Team:"));
+            cmbTeamFilter = new JComboBox<>();
+            cmbTeamFilter.setFont(UITheme.FONT_REGULAR);
+            cmbTeamFilter.addActionListener(e -> applyTaskFilter());
+            filterArea.add(cmbTeamFilter);
             topBar.add(filterArea, BorderLayout.WEST);
 
             JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
@@ -3202,7 +3163,7 @@ public class ProjectManagementSystem {
             lblMembersHead.setForeground(UITheme.TEXT_DARK);
             membersCard.add(lblMembersHead, BorderLayout.NORTH);
 
-            Vector<String> memCols = new Vector<>(Arrays.asList("User ID", "Full Name", "Username", "Account Role", "Department / Tech Stack", "Rate / Budget Limit", "Role Profile"));
+            Vector<String> memCols = new Vector<>(Arrays.asList("User ID", "Name", "Username", "Role", "Department"));
             teamModel = new DefaultTableModel(memCols, 0) {
                 @Override public boolean isCellEditable(int r, int c) { return false; }
             };
@@ -3679,12 +3640,21 @@ public class ProjectManagementSystem {
             // 3. Project Table
             projectAdapter.setProjects(projs);
 
-            // 4. Update Filter Combo
+            // 4. Update Filter Combos
             String prevSelected = (String) cmbProjectFilter.getSelectedItem();
             cmbProjectFilter.removeAllItems();
             cmbProjectFilter.addItem("All Projects (" + projs.size() + ")");
             for (Project p : projs) cmbProjectFilter.addItem("#" + p.getId() + " | " + p.getTitle());
             if (prevSelected != null) cmbProjectFilter.setSelectedItem(prevSelected);
+
+            List<Team> teams = db.getTeams();
+            if (cmbTeamFilter != null) {
+                String prevTeam = (String) cmbTeamFilter.getSelectedItem();
+                cmbTeamFilter.removeAllItems();
+                cmbTeamFilter.addItem("All Teams (" + teams.size() + ")");
+                for (Team tm : teams) cmbTeamFilter.addItem(tm.getName());
+                if (prevTeam != null) cmbTeamFilter.setSelectedItem(prevTeam);
+            }
 
             applyTaskFilter();
 
@@ -3701,7 +3671,19 @@ public class ProjectManagementSystem {
             treeModel.reload();
             for (int i = 0; i < hierarchyTree.getRowCount(); i++) hierarchyTree.expandRow(i);
 
-            // 6. Team Table
+            // 6. Registered Teams Table & Personnel Roster
+            Vector<Vector<Object>> tmData = new Vector<>();
+            for (Team tm : teams) {
+                Vector<Object> r = new Vector<>();
+                r.add(tm.getId());
+                r.add(tm.getName());
+                r.add(tm.getDescription());
+                long activeTasks = tasks.stream().filter(t -> tm.getName().equalsIgnoreCase(t.getAssignedTeam())).count();
+                r.add(activeTasks + " Task(s)");
+                tmData.add(r);
+            }
+            teamsTableModel.setDataVector(tmData, new Vector<>(Arrays.asList("Team ID", "Team Name", "Domain / Mission Description", "Active Tasks Assigned")));
+
             Vector<Vector<Object>> data = new Vector<>();
             for (User u : users) {
                 Vector<Object> row = new Vector<>();
@@ -3709,26 +3691,10 @@ public class ProjectManagementSystem {
                 row.add(u.getFullName());
                 row.add(u.getUsername());
                 row.add(u.getRole().getLabel());
-                if (u instanceof SuperAdmin) {
-                    SuperAdmin sa = (SuperAdmin) u;
-                    row.add(sa.getDepartment());
-                    row.add("Full Authority");
-                } else if (u instanceof Manager) {
-                    Manager m = (Manager) u;
-                    row.add(m.getDepartment());
-                    row.add(String.format("Limit: $%,.2f", m.getBudgetApprovalLimit()));
-                } else if (u instanceof Developer) {
-                    Developer d = (Developer) u;
-                    row.add(d.getTechStack());
-                    row.add(String.format("$%.2f/hr", d.getHourlyRate()));
-                } else {
-                    row.add("-");
-                    row.add("-");
-                }
-                row.add(u.getRoleDescription()); // Dynamic method dispatch
+                row.add(u.getDepartment());
                 data.add(row);
             }
-            teamModel.setDataVector(data, new Vector<>(Arrays.asList("ID", "Full Name", "Username", "Role", "Department / Stack", "Rate / Limit", "Polymorphic Role Description")));
+            teamModel.setDataVector(data, new Vector<>(Arrays.asList("User ID", "Name", "Username", "Role", "Department")));
 
             // 7. Time Logs (Admin / Super Admin Only)
             if (currentUser.hasPermission(Permission.VIEW_TIME_LOGS)) {
