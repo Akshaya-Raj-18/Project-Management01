@@ -1258,9 +1258,23 @@ public class ProjectManagementSystem {
             return userTable.stream().anyMatch(u -> u.getUsername().equalsIgnoreCase(username));
         }
         public synchronized User saveUser(User u) {
-            if (u.getId() == null) u.setId(userIdSequence++);
-            userTable.removeIf(existing -> existing.getId().equals(u.getId()));
-            userTable.add(u);
+            if (u.getId() == null) {
+                u.setId(userIdSequence++);
+                userTable.add(u);
+            } else {
+                int idx = -1;
+                for (int i = 0; i < userTable.size(); i++) {
+                    if (userTable.get(i).getId().equals(u.getId())) {
+                        idx = i;
+                        break;
+                    }
+                }
+                if (idx != -1) {
+                    userTable.set(idx, u);
+                } else {
+                    userTable.add(u);
+                }
+            }
             if (isSqliteConnected && dbConnection != null) {
                 try {
                     String sql = "INSERT OR REPLACE INTO users (id, username, password, full_name, email, role, dept_or_stack, metric_val) VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
@@ -1295,9 +1309,23 @@ public class ProjectManagementSystem {
 
         public synchronized List<Project> getProjects() { return new ArrayList<>(projectTable); }
         public synchronized Project saveProject(Project p) {
-            if (p.getId() == null) p.setId(projectIdSequence++);
-            projectTable.removeIf(existing -> existing.getId().equals(p.getId()));
-            projectTable.add(p);
+            if (p.getId() == null) {
+                p.setId(projectIdSequence++);
+                projectTable.add(p);
+            } else {
+                int idx = -1;
+                for (int i = 0; i < projectTable.size(); i++) {
+                    if (projectTable.get(i).getId().equals(p.getId())) {
+                        idx = i;
+                        break;
+                    }
+                }
+                if (idx != -1) {
+                    projectTable.set(idx, p);
+                } else {
+                    projectTable.add(p);
+                }
+            }
             if (isSqliteConnected && dbConnection != null) {
                 try {
                     String sql = "INSERT OR REPLACE INTO projects (id, title, description, budget, status, client_name, tags) VALUES (?, ?, ?, ?, ?, ?, ?);";
@@ -1344,9 +1372,23 @@ public class ProjectManagementSystem {
 
         public synchronized List<Task> getTasks() { return new ArrayList<>(taskTable); }
         public synchronized Task saveTask(Task t) {
-            if (t.getId() == null) t.setId(taskIdSequence++);
-            taskTable.removeIf(existing -> existing.getId().equals(t.getId()));
-            taskTable.add(t);
+            if (t.getId() == null) {
+                t.setId(taskIdSequence++);
+                taskTable.add(t);
+            } else {
+                int idx = -1;
+                for (int i = 0; i < taskTable.size(); i++) {
+                    if (taskTable.get(i).getId().equals(t.getId())) {
+                        idx = i;
+                        break;
+                    }
+                }
+                if (idx != -1) {
+                    taskTable.set(idx, t);
+                } else {
+                    taskTable.add(t);
+                }
+            }
             if (isSqliteConnected && dbConnection != null) {
                 try {
                     String sql = "INSERT OR REPLACE INTO tasks (id, project_id, title, description, assigned_user_id, parent_task_id, status, priority, estimated_hours, logged_hours, assigned_team) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
@@ -2243,6 +2285,7 @@ public class ProjectManagementSystem {
     public static class AddTeamMemberDialog extends JDialog {
         private boolean saved = false;
         private User createdUser;
+        private final User userToEdit;
 
         private JComboBox<String> cmbRole = new JComboBox<>();
         private JComboBox<String> cmbTeamSelect = new JComboBox<>();
@@ -2257,15 +2300,22 @@ public class ProjectManagementSystem {
         private JLabel lblMetric = new JLabel("Hourly Billing Rate ($): *");
 
         private final User currentUser;
+
         public AddTeamMemberDialog(Frame parent, DatabaseManager db, User currentUser) {
-            super(parent, (currentUser != null && currentUser.hasPermission(Permission.MANAGE_ADMINS)) ? "Register New Account / Administrator" : "Register New Software Developer", true);
+            this(parent, db, currentUser, null);
+        }
+
+        public AddTeamMemberDialog(Frame parent, DatabaseManager db, User currentUser, User userToEdit) {
+            super(parent, userToEdit != null ? ("Edit Account: " + userToEdit.getFullName())
+                    : ((currentUser != null && currentUser.hasPermission(Permission.MANAGE_ADMINS)) ? "Register New Account / Administrator" : "Register New Software Developer"), true);
             this.currentUser = currentUser;
+            this.userToEdit = userToEdit;
             setLayout(new BorderLayout());
             getContentPane().setBackground(UITheme.BG_LIGHT);
 
             JPanel header = new JPanel(new FlowLayout(FlowLayout.LEFT, 15, 12));
             header.setBackground(UITheme.PRIMARY);
-            JLabel lblH = new JLabel("Register New Team Member");
+            JLabel lblH = new JLabel(userToEdit != null ? "Edit User Account & Role Profile" : "Register New Team Member");
             lblH.setFont(UITheme.FONT_SECTION);
             lblH.setForeground(Color.WHITE);
             header.add(lblH);
@@ -2279,38 +2329,53 @@ public class ProjectManagementSystem {
             g.insets = new Insets(5, 5, 5, 5);
             g.fill = GridBagConstraints.HORIZONTAL;
 
-            if (currentUser != null && currentUser.hasPermission(Permission.MANAGE_ADMINS)) {
+            if (userToEdit != null && userToEdit.getRole() == UserRole.SUPER_ADMIN) {
+                cmbRole.addItem("Super Administrator");
+                cmbRole.setEnabled(false);
+            } else if (currentUser != null && currentUser.hasPermission(Permission.MANAGE_ADMINS)) {
                 cmbRole.addItem("Software Developer / User");
                 cmbRole.addItem("Project Manager / Admin");
             } else {
                 cmbRole.addItem("Software Developer / User");
             }
+
             for (Team tm : db.getTeams()) cmbTeamSelect.addItem(tm.getName());
             if (cmbTeamSelect.getItemCount() == 0) cmbTeamSelect.addItem("General Team");
 
-            cmbRole.addActionListener(e -> {
-                if ("Project Manager / Admin".equals(cmbRole.getSelectedItem())) { // Manager
-                    lblSpec.setText("Assigned Department: *");
-                    txtSpec.setText("Engineering Management");
-                    lblMetric.setText("Budget Approval Limit ($): *");
-                    txtMetric.setText("500000.0");
-                } else {
-                    lblSpec.setText("Primary Tech Stack: *");
-                    txtSpec.setText("Java, Microservices, SQLite");
-                    lblMetric.setText("Hourly Billing Rate ($): *");
-                    txtMetric.setText("60.0");
-                }
-            });
+            cmbRole.addActionListener(e -> updateRoleLabels());
 
             int row = 0;
             addRow(form, g, row++, "Account Role: *", cmbRole);
             addRow(form, g, row++, "Functional Team: *", cmbTeamSelect);
             addRow(form, g, row++, "Full Name: *", txtFullName);
             addRow(form, g, row++, "Unique Username: *", txtUsername);
-            addRow(form, g, row++, "Initial Password (min 8 chars): *", txtPassword);
+            addRow(form, g, row++, "Password (min 8 chars): *", txtPassword);
             addRow(form, g, row++, "Email Address (valid format): *", txtEmail);
             addRow(form, g, row++, lblSpec.getText(), txtSpec);
             addRow(form, g, row++, lblMetric.getText(), txtMetric);
+
+            // Pre-populate if editing an existing user
+            if (userToEdit != null) {
+                txtFullName.setText(userToEdit.getFullName());
+                txtUsername.setText(userToEdit.getUsername());
+                txtPassword.setText(userToEdit.getPassword());
+                txtEmail.setText(userToEdit.getEmail());
+
+                if (userToEdit instanceof SuperAdmin) {
+                    txtSpec.setText(((SuperAdmin) userToEdit).getDepartment());
+                    txtMetric.setText("0.0");
+                    txtMetric.setEnabled(false);
+                } else if (userToEdit instanceof Manager) {
+                    cmbRole.setSelectedItem("Project Manager / Admin");
+                    txtSpec.setText(((Manager) userToEdit).getDepartment());
+                    txtMetric.setText(String.valueOf(((Manager) userToEdit).getBudgetApprovalLimit()));
+                } else if (userToEdit instanceof Developer) {
+                    cmbRole.setSelectedItem("Software Developer / User");
+                    txtSpec.setText(((Developer) userToEdit).getTechStack());
+                    txtMetric.setText(String.valueOf(((Developer) userToEdit).getHourlyRate()));
+                }
+                updateRoleLabels();
+            }
 
             add(form, BorderLayout.CENTER);
 
@@ -2320,8 +2385,8 @@ public class ProjectManagementSystem {
             JButton btnCancel = UITheme.createSecondaryButton("Cancel");
             btnCancel.addActionListener(e -> dispose());
 
-            JButton btnAdd = UITheme.createPrimaryButton("Add Team Member");
-            btnAdd.addActionListener(e -> {
+            JButton btnSave = UITheme.createPrimaryButton(userToEdit != null ? "Save Changes" : "Add Team Member");
+            btnSave.addActionListener(e -> {
                 String fn = txtFullName.getText().trim();
                 String un = txtUsername.getText().trim();
                 String pw = new String(txtPassword.getPassword());
@@ -2343,36 +2408,58 @@ public class ProjectManagementSystem {
                     return;
                 }
 
-                if (db.isUsernameTaken(un)) {
+                boolean unChanged = (userToEdit == null) || !un.equalsIgnoreCase(userToEdit.getUsername());
+                if (unChanged && db.isUsernameTaken(un)) {
                     JOptionPane.showMessageDialog(this, "Username '" + un + "' is already taken! Choose another.", "Duplicate Username", JOptionPane.WARNING_MESSAGE);
                     return;
                 }
 
                 double metricVal = 0.0;
-                try {
-                    metricVal = Double.parseDouble(txtMetric.getText().trim());
-                    if (metricVal < 0) throw new NumberFormatException();
-                } catch (NumberFormatException ex) {
-                    JOptionPane.showMessageDialog(this, "Please enter a valid positive numeric rate or budget.", "Validation Error", JOptionPane.WARNING_MESSAGE);
-                    return;
+                if (!(userToEdit instanceof SuperAdmin)) {
+                    try {
+                        metricVal = Double.parseDouble(txtMetric.getText().trim());
+                        if (metricVal < 0) throw new NumberFormatException();
+                    } catch (NumberFormatException ex) {
+                        JOptionPane.showMessageDialog(this, "Please enter a valid positive numeric rate or budget.", "Validation Error", JOptionPane.WARNING_MESSAGE);
+                        return;
+                    }
                 }
 
-                if ("Project Manager / Admin".equals(cmbRole.getSelectedItem())) { // Manager
-                    createdUser = new Manager(null, un, pw, fn, em, spec, metricVal);
-                } else { // Developer
-                    createdUser = new Developer(null, un, pw, fn, em, spec, metricVal);
+                Integer targetId = userToEdit != null ? userToEdit.getId() : null;
+                if (userToEdit instanceof SuperAdmin) {
+                    createdUser = new SuperAdmin(targetId, un, pw, fn, em, spec);
+                } else if ("Project Manager / Admin".equals(cmbRole.getSelectedItem())) {
+                    createdUser = new Manager(targetId, un, pw, fn, em, spec, metricVal);
+                } else {
+                    createdUser = new Developer(targetId, un, pw, fn, em, spec, metricVal);
                 }
                 saved = true;
                 dispose();
             });
 
             footer.add(btnCancel);
-            footer.add(btnAdd);
+            footer.add(btnSave);
             add(footer, BorderLayout.SOUTH);
 
             pack();
             setLocationRelativeTo(parent);
             setResizable(false);
+        }
+
+        private void updateRoleLabels() {
+            if ("Project Manager / Admin".equals(cmbRole.getSelectedItem())) {
+                lblSpec.setText("Assigned Department: *");
+                lblMetric.setText("Budget Approval Limit ($): *");
+                txtMetric.setEnabled(true);
+            } else if ("Super Administrator".equals(cmbRole.getSelectedItem())) {
+                lblSpec.setText("Assigned Department: *");
+                lblMetric.setText("Authority Level:");
+                txtMetric.setEnabled(false);
+            } else {
+                lblSpec.setText("Primary Tech Stack: *");
+                lblMetric.setText("Hourly Billing Rate ($): *");
+                txtMetric.setEnabled(true);
+            }
         }
 
         private void addRow(JPanel p, GridBagConstraints g, int row, String label, JComponent comp) {
@@ -2737,6 +2824,9 @@ public class ProjectManagementSystem {
                 if (dialog.isSaved()) {
                     projectService.saveProject(dialog.getProject(), currentUser);
                     refreshAllViews();
+                    if (row >= 0 && row < projectTable.getRowCount()) {
+                        projectTable.setRowSelectionInterval(row, row);
+                    }
                     JOptionPane.showMessageDialog(this, "Project updated successfully!", "Saved", JOptionPane.INFORMATION_MESSAGE);
                 }
             } catch (UnauthorizedAccessException ex) {
@@ -2931,6 +3021,9 @@ public class ProjectManagementSystem {
                 if (dialog.isSaved()) {
                     taskService.saveTask(dialog.getTask(), currentUser);
                     refreshAllViews();
+                    if (row >= 0 && row < taskTable.getRowCount()) {
+                        taskTable.setRowSelectionInterval(row, row);
+                    }
                     JOptionPane.showMessageDialog(this, "Task updated successfully!", "Saved", JOptionPane.INFORMATION_MESSAGE);
                 }
             } catch (UnauthorizedAccessException ex) {
@@ -2953,6 +3046,9 @@ public class ProjectManagementSystem {
                 try {
                     taskService.updateTaskStatus(t.getId(), chosen, currentUser);
                     refreshAllViews();
+                    if (row >= 0 && row < taskTable.getRowCount()) {
+                        taskTable.setRowSelectionInterval(row, row);
+                    }
                     JOptionPane.showMessageDialog(this, "Status successfully changed to: " + chosen.getLabel(), "Workflow Updated", JOptionPane.INFORMATION_MESSAGE);
                 } catch (InvalidTaskStateException ex) {
                     JOptionPane.showMessageDialog(this, "State Machine Violation:\n" + ex.getMessage(), "Illegal Transition", JOptionPane.ERROR_MESSAGE);
@@ -2980,6 +3076,9 @@ public class ProjectManagementSystem {
                     if (hrs <= 0) throw new NumberFormatException();
                     taskService.logHours(t.getId(), hrs, currentUser);
                     refreshAllViews();
+                    if (row >= 0 && row < taskTable.getRowCount()) {
+                        taskTable.setRowSelectionInterval(row, row);
+                    }
                     JOptionPane.showMessageDialog(this, String.format("Logged %.2f hours on task #%d successfully!", hrs, t.getId()), "Hours Recorded", JOptionPane.INFORMATION_MESSAGE);
                 } catch (Exception ex) {
                     JOptionPane.showMessageDialog(this, "Please enter a valid numeric number of hours (> 0).", "Invalid Input", JOptionPane.WARNING_MESSAGE);
@@ -3048,6 +3147,9 @@ public class ProjectManagementSystem {
                 JButton btnAddMember = UITheme.createPrimaryButton("+ Add User");
                 btnAddMember.addActionListener(e -> handleAddTeamMember());
 
+                JButton btnEditMember = UITheme.createSecondaryButton("Edit User");
+                btnEditMember.addActionListener(e -> handleEditUser());
+
                 JButton btnDeleteUser = UITheme.createDangerButton("- Delete User");
                 btnDeleteUser.addActionListener(e -> handleDeleteUser());
 
@@ -3058,6 +3160,7 @@ public class ProjectManagementSystem {
                 btnDeleteTeam.addActionListener(e -> handleDeleteTeam());
 
                 actions.add(btnAddMember);
+                actions.add(btnEditMember);
                 actions.add(btnDeleteUser);
                 actions.add(btnAddTeam);
                 actions.add(btnDeleteTeam);
@@ -3093,7 +3196,7 @@ public class ProjectManagementSystem {
             JPanel membersCard = UITheme.createCard();
             membersCard.setLayout(new BorderLayout(0, 8));
             JLabel lblMembersHead = new JLabel(currentUser.hasPermission(Permission.MANAGE_USERS)
-                    ? "Personnel & Role Roster (Select a user to Delete or View)"
+                    ? "Personnel & Role Roster (Select a user to Edit, Delete, or View)"
                     : "Personnel & Role Roster (Directory View)");
             lblMembersHead.setFont(UITheme.FONT_SECTION);
             lblMembersHead.setForeground(UITheme.TEXT_DARK);
@@ -3108,6 +3211,16 @@ public class ProjectManagementSystem {
             teamTable.setFont(UITheme.FONT_REGULAR);
             teamTable.getTableHeader().setFont(UITheme.FONT_BOLD);
             teamTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+
+            // Double click to edit user
+            teamTable.addMouseListener(new MouseAdapter() {
+                @Override public void mouseClicked(MouseEvent e) {
+                    if (e.getClickCount() == 2 && currentUser.hasPermission(Permission.MANAGE_USERS)) {
+                        handleEditUser();
+                    }
+                }
+            });
+
             membersCard.add(new JScrollPane(teamTable), BorderLayout.CENTER);
             centerSplit.add(membersCard);
 
@@ -3127,6 +3240,51 @@ public class ProjectManagementSystem {
                 db.saveUser(u);
                 refreshAllViews();
                 JOptionPane.showMessageDialog(this, "Account '" + u.getFullName() + "' (" + u.getRole().getLabel() + ") created successfully!", "Success", JOptionPane.INFORMATION_MESSAGE);
+            }
+        }
+
+        private void handleEditUser() {
+            if (!currentUser.hasPermission(Permission.MANAGE_USERS)) {
+                JOptionPane.showMessageDialog(this, "Access Denied: You do not have permission to edit users.", "Access Denied", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            int row = teamTable.getSelectedRow();
+            if (row < 0) {
+                JOptionPane.showMessageDialog(this, "Please select a user from the table to edit.", "Selection Required", JOptionPane.INFORMATION_MESSAGE);
+                return;
+            }
+            int userId = (Integer) teamModel.getValueAt(row, 0);
+            User targetUser = db.getUsers().stream().filter(u -> u.getId().equals(userId)).findFirst().orElse(null);
+            if (targetUser == null) {
+                JOptionPane.showMessageDialog(this, "User not found.", "Error", JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+            if (targetUser.getRole() == UserRole.SUPER_ADMIN && currentUser.getRole() != UserRole.SUPER_ADMIN) {
+                JOptionPane.showMessageDialog(this, "Access Denied: Only Super Administrators can edit Super Administrator accounts!", "Access Denied", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            if (targetUser.getRole() == UserRole.MANAGER && !currentUser.hasPermission(Permission.MANAGE_ADMINS) && !targetUser.getId().equals(currentUser.getId())) {
+                JOptionPane.showMessageDialog(this,
+                        "Access Denied: Only Super Administrators have permission to edit other Administrator accounts!\n" +
+                        "Your Current Role: " + currentUser.getRole().getLabel(),
+                        "Super Admin Privilege Required", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            AddTeamMemberDialog dialog = new AddTeamMemberDialog(this, db, currentUser, targetUser);
+            dialog.setVisible(true);
+            if (dialog.isSaved()) {
+                User updated = dialog.getCreatedUser();
+                db.saveUser(updated);
+                if (updated.getId().equals(currentUser.getId())) {
+                    currentUser.setFullName(updated.getFullName());
+                    currentUser.setEmail(updated.getEmail());
+                    lblUserBadge.setText(currentUser.getProfileBadgeText());
+                }
+                refreshAllViews();
+                if (row >= 0 && row < teamTable.getRowCount()) {
+                    teamTable.setRowSelectionInterval(row, row);
+                }
+                JOptionPane.showMessageDialog(this, "Account '" + updated.getFullName() + "' (" + updated.getRole().getLabel() + ") updated successfully!", "Saved", JOptionPane.INFORMATION_MESSAGE);
             }
         }
 
