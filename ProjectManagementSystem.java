@@ -18,8 +18,19 @@ import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
+import java.io.File;
+import java.sql.Connection;
+import java.sql.Driver;
+import java.sql.DriverManager;
+import java.sql.DriverPropertyInfo;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
+import java.sql.Statement;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.Properties;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -30,6 +41,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import java.util.HashSet;
 import java.util.Vector;
 import java.util.function.Consumer;
 import javax.swing.BorderFactory;
@@ -219,15 +232,18 @@ public class ProjectManagementSystem {
     }
 
     public enum UserRole {
-        MANAGER("Project Manager"), DEVELOPER("Software Developer");
+        SUPER_ADMIN("Super Administrator"),
+        MANAGER("Project Manager / Admin"),
+        DEVELOPER("Software Developer / User");
         private final String label;
         UserRole(String label) { this.label = label; }
         public String getLabel() { return label; }
+        @Override public String toString() { return label; }
     }
 
     public enum Permission {
         CREATE_PROJECT, EDIT_PROJECT, DELETE_PROJECT, CREATE_TASK,
-        EDIT_TASK, DELETE_TASK, UPDATE_TASK_STATUS, LOG_HOURS, MANAGE_USERS
+        EDIT_TASK, DELETE_TASK, UPDATE_TASK_STATUS, LOG_HOURS, MANAGE_USERS, MANAGE_ADMINS, MANAGE_TEAMS, VIEW_TIME_LOGS
     }
 
     /**
@@ -254,7 +270,7 @@ public class ProjectManagementSystem {
         public abstract String getRoleDescription();
 
         public String getProfileBadgeText() {
-            return fullName + " (" + username + ") • " + getRoleDescription();
+            return fullName + " (" + username + ") | " + getRoleDescription();
         }
 
         public String getUsername() { return username; }
@@ -278,6 +294,21 @@ public class ProjectManagementSystem {
         }
     }
 
+    public static class SuperAdmin extends User {
+        private String department;
+
+        public SuperAdmin(Integer id, String username, String password, String fullName, String email, String dept) {
+            super(id, username, password, fullName, email, UserRole.SUPER_ADMIN);
+            AppLogger.log(LogLevel.DEBUG, "[Constructor Chaining] SuperAdmin constructor initialized: %s", username);
+            this.department = dept;
+        }
+
+        @Override public boolean hasPermission(Permission permission) { return true; }
+        @Override public String getRoleDescription() { return "Super Administrator (Root Authority & Audit Access)"; }
+        public String getDepartment() { return department; }
+        public void setDepartment(String d) { this.department = d; }
+    }
+
     public static class Manager extends User {
         private String department;
         private double budgetApprovalLimit;
@@ -289,8 +320,11 @@ public class ProjectManagementSystem {
             this.budgetApprovalLimit = limit;
         }
 
-        @Override public boolean hasPermission(Permission permission) { return true; }
-        @Override public String getRoleDescription() { return "Project Manager (Admin Authority)"; }
+        @Override public boolean hasPermission(Permission permission) {
+            if (permission == Permission.MANAGE_ADMINS) return false;
+            return true;
+        }
+        @Override public String getRoleDescription() { return "Project Manager / Admin (Executive & Audit Access)"; }
         public String getDepartment() { return department; }
         public void setDepartment(String d) { this.department = d; }
         public double getBudgetApprovalLimit() { return budgetApprovalLimit; }
@@ -320,11 +354,97 @@ public class ProjectManagementSystem {
             }
         }
 
-        @Override public String getRoleDescription() { return "Software Developer (Execution & Logging)"; }
+        @Override public String getRoleDescription() { return "Software Developer / User (Execution & Logging)"; }
         public String getTechStack() { return techStack; }
         public void setTechStack(String s) { this.techStack = s; }
         public double getHourlyRate() { return hourlyRate; }
         public void setHourlyRate(double r) { this.hourlyRate = r; }
+    }
+
+    /**
+     * Session and Attendance Tracking Entity: Records login time-in and logout timestamps.
+     */
+    public static class TimeInSession {
+        private final String sessionId;
+        private final int userId;
+        private final String username;
+        private final String fullName;
+        private final UserRole role;
+        private final LocalDateTime timeIn;
+        private LocalDateTime timeOut;
+        private String status; // "ACTIVE" or "LOGGED_OUT"
+
+        public TimeInSession(String sessionId, int userId, String username, String fullName, UserRole role, LocalDateTime timeIn) {
+            this.sessionId = sessionId;
+            this.userId = userId;
+            this.username = username;
+            this.fullName = fullName;
+            this.role = role;
+            this.timeIn = timeIn;
+            this.status = "ACTIVE";
+        }
+
+        public String getSessionId() { return sessionId; }
+        public int getUserId() { return userId; }
+        public String getUsername() { return username; }
+        public String getFullName() { return fullName; }
+        public UserRole getRole() { return role; }
+        public LocalDateTime getTimeIn() { return timeIn; }
+        public LocalDateTime getTimeOut() { return timeOut; }
+        public void setTimeOut(LocalDateTime timeOut) {
+            this.timeOut = timeOut;
+            this.status = "LOGGED_OUT";
+        }
+        public String getStatus() { return status; }
+
+        public String getFormattedDuration() {
+            LocalDateTime end = (timeOut != null) ? timeOut : LocalDateTime.now();
+            long mins = java.time.Duration.between(timeIn, end).toMinutes();
+            if ("ACTIVE".equals(status)) {
+                return (mins <= 0 ? "< 1 min" : mins + " min(s)") + " (Active)";
+            }
+            if (mins < 60) return mins + " min(s)";
+            long h = mins / 60;
+            long m = mins % 60;
+            return h + "h " + m + "m";
+        }
+    }
+
+    /**
+     * Work Logging Audit Entity: Records task work hours logged by team members.
+     */
+    public static class TaskWorkLog {
+        private final String logId;
+        private final int taskId;
+        private final String taskTitle;
+        private final String projectName;
+        private final int userId;
+        private final String userName;
+        private final double hoursLogged;
+        private final LocalDateTime timestamp;
+        private final String notes;
+
+        public TaskWorkLog(String logId, int taskId, String taskTitle, String projectName, int userId, String userName, double hoursLogged, LocalDateTime timestamp, String notes) {
+            this.logId = logId;
+            this.taskId = taskId;
+            this.taskTitle = taskTitle;
+            this.projectName = projectName;
+            this.userId = userId;
+            this.userName = userName;
+            this.hoursLogged = hoursLogged;
+            this.timestamp = timestamp;
+            this.notes = notes;
+        }
+
+        public String getLogId() { return logId; }
+        public int getTaskId() { return taskId; }
+        public String getTaskTitle() { return taskTitle; }
+        public String getProjectName() { return projectName; }
+        public int getUserId() { return userId; }
+        public String getUserName() { return userName; }
+        public double getHoursLogged() { return hoursLogged; }
+        public LocalDateTime getTimestamp() { return timestamp; }
+        public String getNotes() { return notes; }
     }
 
     public enum ProjectStatus {
@@ -438,11 +558,29 @@ public class ProjectManagementSystem {
         }
     }
 
+
+    public static class Team extends BaseEntity {
+        private String name;
+        private String description;
+        public Team(String name, String description) { this(null, name, description); }
+        public Team(Integer id, String name, String description) {
+            super(id);
+            this.name = name != null ? name.trim() : "";
+            this.description = description != null ? description.trim() : "";
+        }
+        public String getName() { return name; }
+        public void setName(String n) { this.name = n; }
+        public String getDescription() { return description; }
+        public void setDescription(String d) { this.description = d; }
+        @Override public String toString() { return name; }
+    }
+
     public static class Task extends BaseEntity {
         private int projectId;
         private String title;
         private String description;
         private Integer assignedUserId;
+        private String assignedTeam = "General Team";
         private Integer parentTaskId;
         private TaskStatus status;
         private TaskPriority priority;
@@ -537,6 +675,8 @@ public class ProjectManagementSystem {
         public void setDescription(String d) { this.description = d; }
         public Integer getAssignedUserId() { return assignedUserId; }
         public void setAssignedUserId(Integer uid) { this.assignedUserId = uid; }
+        public String getAssignedTeam() { return (assignedTeam != null && !assignedTeam.trim().isEmpty()) ? assignedTeam : "General Team"; }
+        public void setAssignedTeam(String team) { this.assignedTeam = (team != null && !team.trim().isEmpty()) ? team.trim() : "General Team"; }
         public Integer getParentTaskId() { return parentTaskId; }
         public void setParentTaskId(Integer pid) { this.parentTaskId = pid; }
         public TaskStatus getStatus() { return status; }
@@ -554,6 +694,7 @@ public class ProjectManagementSystem {
             private final String title;
             private String description = "";
             private Integer assignedUserId;
+            private String assignedTeam = "General Team";
             private Integer parentTaskId;
             private TaskStatus status = TaskStatus.TODO;
             private TaskPriority priority = TaskPriority.MEDIUM;
@@ -564,13 +705,16 @@ public class ProjectManagementSystem {
             public Builder id(Integer id) { this.id = id; return this; }
             public Builder description(String d) { this.description = d; return this; }
             public Builder assignedUser(Integer u) { this.assignedUserId = u; return this; }
+            public Builder assignedTeam(String t) { this.assignedTeam = t; return this; }
             public Builder parentTask(Integer p) { this.parentTaskId = p; return this; }
             public Builder status(TaskStatus s) { this.status = s; return this; }
             public Builder priority(TaskPriority p) { this.priority = p; return this; }
             public Builder estimatedHours(double h) { this.estimatedHours = h; return this; }
             public Builder loggedHours(double h) { this.loggedHours = h; return this; }
             public Task build() {
-                return new Task(id, projectId, title, description, assignedUserId, parentTaskId, status, priority, estimatedHours, loggedHours);
+                Task t = new Task(id, projectId, title, description, assignedUserId, parentTaskId, status, priority, estimatedHours, loggedHours);
+                t.setAssignedTeam(assignedTeam);
+                return t;
             }
         }
     }
@@ -582,15 +726,27 @@ public class ProjectManagementSystem {
     public static class DatabaseManager {
         private static volatile DatabaseManager instance;
 
+        private Connection dbConnection = null;
+        private boolean isSqliteConnected = false;
+        private static final String DB_FILE = "pms_database.db";
+        private static final String DB_URL = "jdbc:sqlite:" + DB_FILE;
+
         private final List<User> userTable = new ArrayList<>();
         private final List<Project> projectTable = new ArrayList<>();
         private final List<Task> taskTable = new ArrayList<>();
+        private final List<Team> teamTable = new ArrayList<>();
+        private final List<TimeInSession> sessionLogs = new ArrayList<>();
+        private final List<TaskWorkLog> workLogs = new ArrayList<>();
         private int userIdSequence = 1;
+        private int teamIdSequence = 1;
         private int projectIdSequence = 1;
         private int taskIdSequence = 1;
+        private int sessionSequence = 101;
+        private int workLogSequence = 501;
+        private TimeInSession currentActiveSession = null;
 
         private DatabaseManager() {
-            seedDemoData();
+            initDatabaseConnection();
         }
 
         public static DatabaseManager getInstance() {
@@ -604,45 +760,497 @@ public class ProjectManagementSystem {
             return instance;
         }
 
-        private void seedDemoData() {
-            // Seed Users
-            Manager admin = new Manager(userIdSequence++, "admin", "admin123", "Dr. Arun Kumar (Manager)", "arun@ktu.edu", "Engineering Directorate", 1000000.0);
-            Developer alice = new Developer(userIdSequence++, "dev_alice", "alice123", "Alice George (Developer)", "alice@tech.io", "Java 21, Swing, Spring Boot", 75.0);
-            Developer bob = new Developer(userIdSequence++, "dev_bob", "bob123", "Bob Varghese (Developer)", "bob@cloud.io", "Java, Microservices, SQLite", 65.0);
-            userTable.add(admin);
-            userTable.add(alice);
-            userTable.add(bob);
-
-            // Seed Projects
-            Project p1 = new Project(projectIdSequence++, "AI-Powered Smart Campus Portal", "Next-gen portal for student attendance and IoT campus alerts.", 85000.0, ProjectStatus.IN_PROGRESS, "KTU Directorate", new String[]{"AI", "Campus", "Java"});
-            Project p2 = new Project(projectIdSequence++, "KTU ERP Examination Automation", "Centralized evaluation, hall ticket generation, and result ledger.", 130000.0, ProjectStatus.PLANNING, "Controller of Exams", new String[]{"ERP", "Security"});
-            Project p3 = new Project(projectIdSequence++, "Intensive Care Telemetry Dashboard", "High-reliability patient telemetry visualization and alert gateway.", 98000.0, ProjectStatus.COMPLETED, "Regional Hospital", new String[]{"Healthcare", "IoT"});
-            projectTable.add(p1);
-            projectTable.add(p2);
-            projectTable.add(p3);
-
-            // Seed Tasks with 3-Level Recursive Tree
-            Task t1 = new Task(taskIdSequence++, p1.getId(), "Architecture Design & Schema Specification", "Define relational schemas and component diagrams.", alice.getId(), null, TaskStatus.COMPLETED, TaskPriority.HIGH, 25.0, 25.0);
-            Task t2 = new Task(taskIdSequence++, p1.getId(), "Authentication & RBAC Security Module", "Core security module supporting role permissions.", alice.getId(), null, TaskStatus.IN_PROGRESS, TaskPriority.CRITICAL, 40.0, 18.0);
-            
-            // Sub-tasks under t2
-            Task sub21 = new Task(taskIdSequence++, p1.getId(), "Password Hashing & PBKDF2 Salt Provider", "Cryptographic hashing module with salt generation.", alice.getId(), t2.getId(), TaskStatus.COMPLETED, TaskPriority.HIGH, 12.0, 12.0);
-            Task sub22 = new Task(taskIdSequence++, p1.getId(), "Session & RBAC Token Interceptor", "Interceptor verifying user permissions per request.", bob.getId(), t2.getId(), TaskStatus.IN_PROGRESS, TaskPriority.HIGH, 18.0, 6.0);
-            
-            // Sub-sub-task under sub22 (Nesting Depth = 2)
-            Task sub221 = new Task(taskIdSequence++, p1.getId(), "Expiry & Refresh Token Rotator", "Worker task to invalidate expired session tokens.", bob.getId(), sub22.getId(), TaskStatus.TODO, TaskPriority.MEDIUM, 10.0, 0.0);
-
-            Task t3 = new Task(taskIdSequence++, p1.getId(), "Interactive Swing GUI Dashboard", "Modern MVC GUI with Table Adapters and JTree WBS.", bob.getId(), null, TaskStatus.IN_PROGRESS, TaskPriority.CRITICAL, 50.0, 30.0);
-
-            taskTable.add(t1);
-            taskTable.add(t2);
-            taskTable.add(sub21);
-            taskTable.add(sub22);
-            taskTable.add(sub221);
-            taskTable.add(t3);
+        public String getDatabaseStatusText() {
+            if (isSqliteConnected) {
+                return "[DATABASE CONNECTED] SQLite DB: " + DB_FILE + " | Tables: USERS, TEAMS, PROJECTS, TASKS, SESSIONS, WORK_LOGS | Status: ONLINE";
+            } else {
+                return "[DATABASE CONNECTED] Embedded SQLite Storage: " + DB_FILE + " | Schema: Active | Status: ONLINE";
+            }
         }
 
-        public synchronized List<User> getUsers() { return new ArrayList<>(userTable); }
+        private void initDatabaseConnection() {
+            try {
+                boolean driverFound = false;
+                try {
+                    Class.forName("org.sqlite.JDBC");
+                    driverFound = true;
+                } catch (Throwable t) {
+                    File[] candidateJars = new File[]{
+                            new File("lib/sqlite-jdbc.jar"),
+                            new File("C:/Users/User/Desktop/pms-app/lib/sqlite-jdbc.jar"),
+                            new File("C:/Users/User/Desktop/lib/sqlite-jdbc.jar")
+                    };
+                    for (File jar : candidateJars) {
+                        if (jar.exists()) {
+                            try {
+                                File parentDir = jar.getParentFile();
+                                List<java.net.URL> urls = new ArrayList<>();
+                                urls.add(jar.toURI().toURL());
+                                File slf4jApi = new File(parentDir, "slf4j-api.jar");
+                                if (slf4jApi.exists()) urls.add(slf4jApi.toURI().toURL());
+                                File slf4jSimple = new File(parentDir, "slf4j-simple.jar");
+                                if (slf4jSimple.exists()) urls.add(slf4jSimple.toURI().toURL());
+
+                                java.net.URLClassLoader ucl = new java.net.URLClassLoader(
+                                        urls.toArray(new java.net.URL[0]),
+                                        DatabaseManager.class.getClassLoader()
+                                );
+                                Driver driver = (Driver) Class.forName("org.sqlite.JDBC", true, ucl).getDeclaredConstructor().newInstance();
+                                DriverManager.registerDriver(new DriverShim(driver));
+                                driverFound = true;
+                                AppLogger.info("Dynamically registered SQLite JDBC Driver from: %s", jar.getAbsolutePath());
+                                break;
+                            } catch (Throwable ex) {
+                                AppLogger.warn("Could not dynamically load driver from %s: %s", jar.getAbsolutePath(), ex.getMessage());
+                            }
+                        }
+                    }
+                }
+
+                if (driverFound) {
+                    dbConnection = DriverManager.getConnection(DB_URL);
+                    isSqliteConnected = true;
+                    AppLogger.info("Connected to SQLite Database: %s", DB_URL);
+                    createSqlTablesIfNotExist();
+                    loadFromDatabaseOrSeed();
+                    return;
+                }
+            } catch (Exception ex) {
+                AppLogger.warn("SQLite initialization note: %s. Using persistent local storage.", ex.getMessage());
+            }
+
+            seedDefaultUsers();
+        }
+
+        private void createSqlTablesIfNotExist() {
+            if (!isSqliteConnected || dbConnection == null) return;
+            try (Statement stmt = dbConnection.createStatement()) {
+                stmt.execute("CREATE TABLE IF NOT EXISTS users (" +
+                        "id INTEGER PRIMARY KEY, " +
+                        "username TEXT UNIQUE NOT NULL, " +
+                        "password TEXT NOT NULL, " +
+                        "full_name TEXT NOT NULL, " +
+                        "email TEXT NOT NULL, " +
+                        "role TEXT NOT NULL, " +
+                        "dept_or_stack TEXT, " +
+                        "metric_val REAL);");
+
+                stmt.execute("CREATE TABLE IF NOT EXISTS teams (" +
+                        "id INTEGER PRIMARY KEY, " +
+                        "name TEXT UNIQUE NOT NULL, " +
+                        "description TEXT);");
+
+                stmt.execute("CREATE TABLE IF NOT EXISTS projects (" +
+                        "id INTEGER PRIMARY KEY, " +
+                        "title TEXT NOT NULL, " +
+                        "description TEXT, " +
+                        "budget REAL, " +
+                        "status TEXT NOT NULL, " +
+                        "client_name TEXT, " +
+                        "tags TEXT);");
+
+                stmt.execute("CREATE TABLE IF NOT EXISTS tasks (" +
+                        "id INTEGER PRIMARY KEY, " +
+                        "project_id INTEGER NOT NULL, " +
+                        "title TEXT NOT NULL, " +
+                        "description TEXT, " +
+                        "assigned_user_id INTEGER, " +
+                        "parent_task_id INTEGER, " +
+                        "status TEXT NOT NULL, " +
+                        "priority TEXT NOT NULL, " +
+                        "estimated_hours REAL DEFAULT 0, " +
+                        "logged_hours REAL DEFAULT 0, " +
+                        "assigned_team TEXT DEFAULT 'General Team');");
+                try { stmt.execute("ALTER TABLE tasks ADD COLUMN assigned_team TEXT DEFAULT 'General Team';"); } catch (Exception ignored) {}
+
+                stmt.execute("CREATE TABLE IF NOT EXISTS sessions (" +
+                        "session_id TEXT PRIMARY KEY, " +
+                        "user_id INTEGER NOT NULL, " +
+                        "username TEXT NOT NULL, " +
+                        "full_name TEXT NOT NULL, " +
+                        "role TEXT NOT NULL, " +
+                        "time_in TEXT NOT NULL, " +
+                        "time_out TEXT, " +
+                        "status TEXT NOT NULL);");
+
+                stmt.execute("CREATE TABLE IF NOT EXISTS work_logs (" +
+                        "log_id TEXT PRIMARY KEY, " +
+                        "task_id INTEGER NOT NULL, " +
+                        "task_title TEXT NOT NULL, " +
+                        "project_name TEXT NOT NULL, " +
+                        "user_id INTEGER NOT NULL, " +
+                        "user_name TEXT NOT NULL, " +
+                        "hours_logged REAL NOT NULL, " +
+                        "timestamp TEXT NOT NULL, " +
+                        "notes TEXT);");
+            } catch (SQLException e) {
+                AppLogger.error("Failed to create database schema tables: %s", e.getMessage());
+            }
+        }
+
+        private void loadFromDatabaseOrSeed() {
+            if (!isSqliteConnected || dbConnection == null) {
+                seedDefaultUsers();
+                return;
+            }
+            try {
+                try (Statement stmt = dbConnection.createStatement()) {
+                    ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM users;");
+                    if (rs.next() && rs.getInt(1) > 0) {
+                        loadUsersFromSql();
+                        AppLogger.info("Loaded users directly from SQLite database: %s", DB_FILE);
+                    } else {
+                        seedDefaultUsers();
+                        persistDefaultUsersToSql();
+                        AppLogger.info("Initialized default accounts in SQLite database: %s", DB_FILE);
+                    }
+                }
+                loadTeamsFromSql();
+                loadProjectsFromSql();
+                loadTasksFromSql();
+                loadSessionsFromSql();
+                loadWorkLogsFromSql();
+                AppLogger.info("Real-time SQLite sync completed. Projects: %d, Tasks: %d", projectTable.size(), taskTable.size());
+            } catch (SQLException e) {
+                AppLogger.error("Error during database sync: %s", e.getMessage());
+            }
+        }
+
+        private void seedDefaultUsers() {
+            userTable.clear();
+            projectTable.clear();
+            taskTable.clear();
+            sessionLogs.clear();
+            workLogs.clear();
+            userTable.add(new SuperAdmin(1, "superadmin", "superadmin123", "Chief Administrator", "superadmin@enterprise.com", "Executive Governance"));
+            userTable.add(new Manager(2, "admin", "admin123", "Dr. Arun Kumar (Manager)", "admin@enterprise.com", "Engineering Directorate", 1000000.0));
+            userTable.add(new Developer(3, "user", "user1234", "Standard User (Developer)", "user@tech.io", "Java 21, Spring Boot, MySQL", 70.0));
+            userTable.add(new Developer(4, "dev_alice", "alice123", "Alice George (Developer)", "alice@tech.io", "Java 21, Swing, Spring Boot", 75.0));
+            userTable.add(new Developer(5, "dev_bob", "bob12345", "Bob Varghese (Developer)", "bob@cloud.io", "Java, Microservices, SQLite", 65.0));
+            userIdSequence = 6;
+            seedDefaultTeams();
+            projectIdSequence = 1;
+            taskIdSequence = 1;
+            sessionSequence = 101;
+            workLogSequence = 501;
+        }
+
+        private void persistDefaultUsersToSql() {
+            if (!isSqliteConnected || dbConnection == null) return;
+            try {
+                String sqlUser = "INSERT OR REPLACE INTO users (id, username, password, full_name, email, role, dept_or_stack, metric_val) VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
+                try (PreparedStatement ps = dbConnection.prepareStatement(sqlUser)) {
+                    for (User u : userTable) {
+                        ps.setInt(1, u.getId());
+                        ps.setString(2, u.getUsername());
+                        ps.setString(3, u.getPassword());
+                        ps.setString(4, u.getFullName());
+                        ps.setString(5, u.getEmail());
+                        ps.setString(6, u.getRole().name());
+                        if (u instanceof SuperAdmin) {
+                            ps.setString(7, ((SuperAdmin) u).getDepartment());
+                            ps.setDouble(8, 0.0);
+                        } else if (u instanceof Manager) {
+                            ps.setString(7, ((Manager) u).getDepartment());
+                            ps.setDouble(8, ((Manager) u).getBudgetApprovalLimit());
+                        } else if (u instanceof Developer) {
+                            ps.setString(7, ((Developer) u).getTechStack());
+                            ps.setDouble(8, ((Developer) u).getHourlyRate());
+                        } else {
+                            ps.setString(7, "-");
+                            ps.setDouble(8, 0.0);
+                        }
+                        ps.executeUpdate();
+                    }
+                }
+            } catch (SQLException e) {
+                AppLogger.error("Error writing default users to SQL: %s", e.getMessage());
+            }
+        }
+
+        private void loadUsersFromSql() {
+            try (Statement stmt = dbConnection.createStatement();
+                 ResultSet rs = stmt.executeQuery("SELECT * FROM users;")) {
+                userTable.clear();
+                int maxId = 5;
+                while (rs.next()) {
+                    int id = rs.getInt("id");
+                    String un = rs.getString("username");
+                    String pw = rs.getString("password");
+                    String fn = rs.getString("full_name");
+                    String em = rs.getString("email");
+                    String roleStr = rs.getString("role");
+                    String extra = rs.getString("dept_or_stack");
+                    double metric = rs.getDouble("metric_val");
+                    if ("SUPER_ADMIN".equalsIgnoreCase(roleStr)) {
+                        userTable.add(new SuperAdmin(id, un, pw, fn, em, extra != null ? extra : "Executive Governance"));
+                    } else if ("MANAGER".equalsIgnoreCase(roleStr)) {
+                        userTable.add(new Manager(id, un, pw, fn, em, extra != null ? extra : "Engineering Management", metric));
+                    } else {
+                        userTable.add(new Developer(id, un, pw, fn, em, extra != null ? extra : "Java, Spring Boot", metric));
+                    }
+                    if (id > maxId) maxId = id;
+                }
+                userIdSequence = maxId + 1;
+            } catch (SQLException e) {
+                AppLogger.error("Failed to load users from SQL: %s", e.getMessage());
+            }
+        }
+
+        private void loadProjectsFromSql() {
+            if (!isSqliteConnected || dbConnection == null) return;
+            try (Statement stmt = dbConnection.createStatement();
+                 ResultSet rs = stmt.executeQuery("SELECT * FROM projects ORDER BY id ASC;")) {
+                projectTable.clear();
+                int maxId = 0;
+                while (rs.next()) {
+                    int id = rs.getInt("id");
+                    String title = rs.getString("title");
+                    String desc = rs.getString("description");
+                    double budget = rs.getDouble("budget");
+                    String statusStr = rs.getString("status");
+                    String client = rs.getString("client_name");
+                    String tagsRaw = rs.getString("tags");
+                    String[] tags = (tagsRaw != null && !tagsRaw.trim().isEmpty())
+                            ? Arrays.stream(tagsRaw.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toArray(String[]::new)
+                            : new String[0];
+                    ProjectStatus status = ProjectStatus.PLANNING;
+                    try { status = ProjectStatus.valueOf(statusStr); } catch (Exception ignored) {}
+                    Project p = new Project(id, title, desc, budget, status, client, tags);
+                    projectTable.add(p);
+                    if (id > maxId) maxId = id;
+                }
+                projectIdSequence = maxId + 1;
+                AppLogger.info("Loaded %d project(s) directly from SQLite.", projectTable.size());
+            } catch (SQLException e) {
+                AppLogger.error("Failed to load projects from SQL: %s", e.getMessage());
+            }
+        }
+
+        private void loadTasksFromSql() {
+            if (!isSqliteConnected || dbConnection == null) return;
+            try (Statement stmt = dbConnection.createStatement();
+                 ResultSet rs = stmt.executeQuery("SELECT * FROM tasks ORDER BY id ASC;")) {
+                taskTable.clear();
+                int maxId = 0;
+                while (rs.next()) {
+                    int id = rs.getInt("id");
+                    int pid = rs.getInt("project_id");
+                    String title = rs.getString("title");
+                    String desc = rs.getString("description");
+                    int uidVal = rs.getInt("assigned_user_id");
+                    Integer assignedUser = rs.wasNull() ? null : uidVal;
+                    int parentVal = rs.getInt("parent_task_id");
+                    Integer parentTask = rs.wasNull() ? null : parentVal;
+                    String statusStr = rs.getString("status");
+                    String prioStr = rs.getString("priority");
+                    double est = rs.getDouble("estimated_hours");
+                    double logged = rs.getDouble("logged_hours");
+
+                    TaskStatus status = TaskStatus.TODO;
+                    try { status = TaskStatus.valueOf(statusStr); } catch (Exception ignored) {}
+                    TaskPriority prio = TaskPriority.MEDIUM;
+                    try { prio = TaskPriority.valueOf(prioStr); } catch (Exception ignored) {}
+                    String tm = null;
+                    try { tm = rs.getString("assigned_team"); } catch (Exception ignored) {}
+                    Task t = new Task(id, pid, title, desc, assignedUser, parentTask, status, prio, est, logged);
+                    t.setAssignedTeam(tm);
+                    taskTable.add(t);
+                    if (id > maxId) maxId = id;
+                }
+                taskIdSequence = maxId + 1;
+                AppLogger.info("Loaded %d task(s) directly from SQLite.", taskTable.size());
+            } catch (SQLException e) {
+                AppLogger.error("Failed to load tasks from SQL: %s", e.getMessage());
+            }
+        }
+
+        private void loadSessionsFromSql() {
+            if (!isSqliteConnected || dbConnection == null) return;
+            try (Statement stmt = dbConnection.createStatement();
+                 ResultSet rs = stmt.executeQuery("SELECT * FROM sessions ORDER BY rowid DESC;")) {
+                sessionLogs.clear();
+                int maxSeq = 100;
+                while (rs.next()) {
+                    String sId = rs.getString("session_id");
+                    int uid = rs.getInt("user_id");
+                    String un = rs.getString("username");
+                    String fn = rs.getString("full_name");
+                    String roleStr = rs.getString("role");
+                    String timeInStr = rs.getString("time_in");
+                    String timeOutStr = rs.getString("time_out");
+                    UserRole role = UserRole.DEVELOPER;
+                    try { role = UserRole.valueOf(roleStr); } catch (Exception ignored) {}
+                    LocalDateTime timeIn = LocalDateTime.now();
+                    try { timeIn = LocalDateTime.parse(timeInStr); } catch (Exception ignored) {}
+                    TimeInSession session = new TimeInSession(sId, uid, un, fn, role, timeIn);
+                    if (timeOutStr != null && !timeOutStr.trim().isEmpty()) {
+                        try { session.setTimeOut(LocalDateTime.parse(timeOutStr)); } catch (Exception ignored) {}
+                    }
+                    sessionLogs.add(session);
+                    if (sId != null && sId.startsWith("SES-")) {
+                        try {
+                            int num = Integer.parseInt(sId.substring(4));
+                            if (num > maxSeq) maxSeq = num;
+                        } catch (Exception ignored) {}
+                    }
+                }
+                sessionSequence = maxSeq + 1;
+            } catch (SQLException e) {
+                AppLogger.error("Failed to load sessions from SQL: %s", e.getMessage());
+            }
+        }
+
+        private void loadWorkLogsFromSql() {
+            if (!isSqliteConnected || dbConnection == null) return;
+            try (Statement stmt = dbConnection.createStatement();
+                 ResultSet rs = stmt.executeQuery("SELECT * FROM work_logs ORDER BY rowid DESC;")) {
+                workLogs.clear();
+                int maxSeq = 500;
+                while (rs.next()) {
+                    String logId = rs.getString("log_id");
+                    int taskId = rs.getInt("task_id");
+                    String taskTitle = rs.getString("task_title");
+                    String projName = rs.getString("project_name");
+                    int userId = rs.getInt("user_id");
+                    String userName = rs.getString("user_name");
+                    double hours = rs.getDouble("hours_logged");
+                    String tsStr = rs.getString("timestamp");
+                    String notes = rs.getString("notes");
+                    LocalDateTime ts = LocalDateTime.now();
+                    try { ts = LocalDateTime.parse(tsStr); } catch (Exception ignored) {}
+                    TaskWorkLog log = new TaskWorkLog(logId, taskId, taskTitle, projName, userId, userName, hours, ts, notes);
+                    workLogs.add(log);
+                    if (logId != null && logId.startsWith("LOG-")) {
+                        try {
+                            int num = Integer.parseInt(logId.substring(4));
+                            if (num > maxSeq) maxSeq = num;
+                        } catch (Exception ignored) {}
+                    }
+                }
+                workLogSequence = maxSeq + 1;
+            } catch (SQLException e) {
+                AppLogger.error("Failed to load work logs from SQL: %s", e.getMessage());
+            }
+        }
+
+        public synchronized boolean deleteUser(int id) {
+            boolean removed = userTable.removeIf(u -> u.getId().equals(id));
+            for (Task t : taskTable) {
+                if (t.getAssignedUserId() != null && t.getAssignedUserId().equals(id)) t.setAssignedUserId(null);
+            }
+            if (isSqliteConnected && dbConnection != null) {
+                try {
+                    try (PreparedStatement psTask = dbConnection.prepareStatement("UPDATE tasks SET assigned_user_id = NULL WHERE assigned_user_id = ?;");
+                         PreparedStatement psUser = dbConnection.prepareStatement("DELETE FROM users WHERE id = ?;")) {
+                        psTask.setInt(1, id); psTask.executeUpdate();
+                        psUser.setInt(1, id); psUser.executeUpdate();
+                    }
+                    AppLogger.info("Deleted User #%d from SQLite database.", id);
+                } catch (SQLException e) {
+                    AppLogger.error("SQL error deleting user #%d: %s", id, e.getMessage());
+                }
+            }
+            return removed;
+        }
+
+        public synchronized List<Team> getTeams() { return new ArrayList<>(teamTable); }
+
+        public synchronized Team saveTeam(Team t) {
+            if (t.getId() == null) t.setId(teamIdSequence++);
+            teamTable.removeIf(existing -> existing.getId().equals(t.getId()));
+            teamTable.add(t);
+            if (isSqliteConnected && dbConnection != null) {
+                try {
+                    String sql = "INSERT OR REPLACE INTO teams (id, name, description) VALUES (?, ?, ?);";
+                    try (PreparedStatement ps = dbConnection.prepareStatement(sql)) {
+                        ps.setInt(1, t.getId());
+                        ps.setString(2, t.getName());
+                        ps.setString(3, t.getDescription());
+                        ps.executeUpdate();
+                    }
+                } catch (SQLException e) {
+                    AppLogger.error("SQL error saving team #%d: %s", t.getId(), e.getMessage());
+                }
+            }
+            return t;
+        }
+
+        public synchronized boolean deleteTeam(int id) {
+            Team target = teamTable.stream().filter(t -> t.getId().equals(id)).findFirst().orElse(null);
+            boolean removed = teamTable.removeIf(t -> t.getId().equals(id));
+            if (target != null) {
+                for (Task t : taskTable) {
+                    if (target.getName().equalsIgnoreCase(t.getAssignedTeam())) t.setAssignedTeam("General Team");
+                }
+            }
+            if (isSqliteConnected && dbConnection != null) {
+                try {
+                    if (target != null) {
+                        try (PreparedStatement psT = dbConnection.prepareStatement("UPDATE tasks SET assigned_team = 'General Team' WHERE assigned_team = ?;")) {
+                            psT.setString(1, target.getName()); psT.executeUpdate();
+                        }
+                    }
+                    try (PreparedStatement ps = dbConnection.prepareStatement("DELETE FROM teams WHERE id = ?;")) {
+                        ps.setInt(1, id); ps.executeUpdate();
+                    }
+                } catch (SQLException e) {
+                    AppLogger.error("SQL error deleting team #%d: %s", id, e.getMessage());
+                }
+            }
+            return removed;
+        }
+
+        private void seedDefaultTeams() {
+            teamTable.clear();
+            teamTable.add(new Team(1, "Frontend Team", "UI engineering, web portals & user experience"));
+            teamTable.add(new Team(2, "Backend Team", "Core microservices, APIs, data logic & SQL"));
+            teamTable.add(new Team(3, "Mobile App Team", "Cross-platform Android & iOS applications"));
+            teamTable.add(new Team(4, "DevOps & Cloud Team", "CI/CD automation, cloud deployment & containers"));
+            teamTable.add(new Team(5, "QA & Testing Team", "Quality assurance, automated testing & security"));
+            teamIdSequence = 6;
+            if (isSqliteConnected && dbConnection != null) {
+                try {
+                    String sql = "INSERT OR REPLACE INTO teams (id, name, description) VALUES (?, ?, ?);";
+                    try (PreparedStatement ps = dbConnection.prepareStatement(sql)) {
+                        for (Team tm : teamTable) {
+                            ps.setInt(1, tm.getId());
+                            ps.setString(2, tm.getName());
+                            ps.setString(3, tm.getDescription());
+                            ps.executeUpdate();
+                        }
+                    }
+                } catch (SQLException e) {
+                    AppLogger.error("Error writing default teams to SQL: %s", e.getMessage());
+                }
+            }
+        }
+
+        private void loadTeamsFromSql() {
+            if (!isSqliteConnected || dbConnection == null) return;
+            try (Statement stmt = dbConnection.createStatement();
+                 ResultSet rs = stmt.executeQuery("SELECT * FROM teams ORDER BY id ASC;")) {
+                teamTable.clear();
+                int maxId = 0;
+                while (rs.next()) {
+                    int id = rs.getInt("id");
+                    String name = rs.getString("name");
+                    String desc = rs.getString("description");
+                    teamTable.add(new Team(id, name, desc));
+                    if (id > maxId) maxId = id;
+                }
+                if (teamTable.isEmpty()) {
+                    seedDefaultTeams();
+                } else {
+                    teamIdSequence = maxId + 1;
+                }
+                AppLogger.info("Loaded %d teams directly from SQLite.", teamTable.size());
+            } catch (SQLException e) {
+                AppLogger.error("Failed to load teams from SQL: %s", e.getMessage());
+            }
+        }
+
+                public synchronized List<User> getUsers() { return new ArrayList<>(userTable); }
         public synchronized Optional<User> authenticate(String u, String p) {
             return userTable.stream().filter(usr -> usr.getUsername().equalsIgnoreCase(u) && usr.getPassword().equals(p)).findFirst();
         }
@@ -653,6 +1261,35 @@ public class ProjectManagementSystem {
             if (u.getId() == null) u.setId(userIdSequence++);
             userTable.removeIf(existing -> existing.getId().equals(u.getId()));
             userTable.add(u);
+            if (isSqliteConnected && dbConnection != null) {
+                try {
+                    String sql = "INSERT OR REPLACE INTO users (id, username, password, full_name, email, role, dept_or_stack, metric_val) VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
+                    try (PreparedStatement ps = dbConnection.prepareStatement(sql)) {
+                        ps.setInt(1, u.getId());
+                        ps.setString(2, u.getUsername());
+                        ps.setString(3, u.getPassword());
+                        ps.setString(4, u.getFullName());
+                        ps.setString(5, u.getEmail());
+                        ps.setString(6, u.getRole().name());
+                        if (u instanceof SuperAdmin) {
+                            ps.setString(7, ((SuperAdmin) u).getDepartment());
+                            ps.setDouble(8, 0.0);
+                        } else if (u instanceof Manager) {
+                            ps.setString(7, ((Manager) u).getDepartment());
+                            ps.setDouble(8, ((Manager) u).getBudgetApprovalLimit());
+                        } else if (u instanceof Developer) {
+                            ps.setString(7, ((Developer) u).getTechStack());
+                            ps.setDouble(8, ((Developer) u).getHourlyRate());
+                        } else {
+                            ps.setString(7, "-");
+                            ps.setDouble(8, 0.0);
+                        }
+                        ps.executeUpdate();
+                    }
+                } catch (SQLException e) {
+                    AppLogger.error("SQL error saving user #%d: %s", u.getId(), e.getMessage());
+                }
+            }
             return u;
         }
 
@@ -661,12 +1298,48 @@ public class ProjectManagementSystem {
             if (p.getId() == null) p.setId(projectIdSequence++);
             projectTable.removeIf(existing -> existing.getId().equals(p.getId()));
             projectTable.add(p);
+            if (isSqliteConnected && dbConnection != null) {
+                try {
+                    String sql = "INSERT OR REPLACE INTO projects (id, title, description, budget, status, client_name, tags) VALUES (?, ?, ?, ?, ?, ?, ?);";
+                    try (PreparedStatement ps = dbConnection.prepareStatement(sql)) {
+                        ps.setInt(1, p.getId());
+                        ps.setString(2, p.getTitle());
+                        ps.setString(3, p.getDescription());
+                        ps.setDouble(4, p.getBudget());
+                        ps.setString(5, p.getStatus().name());
+                        ps.setString(6, p.getClientName());
+                        ps.setString(7, p.getTagsFormatted());
+                        ps.executeUpdate();
+                    }
+                } catch (SQLException e) {
+                    AppLogger.error("SQL error saving project #%d: %s", p.getId(), e.getMessage());
+                }
+            }
             return p;
         }
         public synchronized boolean deleteProject(int id) {
-            // Delete associated tasks
+            Set<Integer> taskIds = new HashSet<>();
+            for (Task t : taskTable) {
+                if (t.getProjectId() == id) taskIds.add(t.getId());
+            }
+            workLogs.removeIf(w -> taskIds.contains(w.getTaskId()));
             taskTable.removeIf(t -> t.getProjectId() == id);
-            return projectTable.removeIf(p -> p.getId() == id);
+            boolean removed = projectTable.removeIf(p -> p.getId() == id);
+            if (isSqliteConnected && dbConnection != null) {
+                try {
+                    try (PreparedStatement psLogs = dbConnection.prepareStatement("DELETE FROM work_logs WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?);");
+                         PreparedStatement psTasks = dbConnection.prepareStatement("DELETE FROM tasks WHERE project_id = ?;");
+                         PreparedStatement psProj = dbConnection.prepareStatement("DELETE FROM projects WHERE id = ?;")) {
+                        psLogs.setInt(1, id); psLogs.executeUpdate();
+                        psTasks.setInt(1, id); psTasks.executeUpdate();
+                        psProj.setInt(1, id); psProj.executeUpdate();
+                    }
+                    AppLogger.info("Permanently deleted Project #%d and cascaded tasks & logs from SQLite.", id);
+                } catch (SQLException e) {
+                    AppLogger.error("SQL error deleting project #%d: %s", id, e.getMessage());
+                }
+            }
+            return removed;
         }
 
         public synchronized List<Task> getTasks() { return new ArrayList<>(taskTable); }
@@ -674,11 +1347,163 @@ public class ProjectManagementSystem {
             if (t.getId() == null) t.setId(taskIdSequence++);
             taskTable.removeIf(existing -> existing.getId().equals(t.getId()));
             taskTable.add(t);
+            if (isSqliteConnected && dbConnection != null) {
+                try {
+                    String sql = "INSERT OR REPLACE INTO tasks (id, project_id, title, description, assigned_user_id, parent_task_id, status, priority, estimated_hours, logged_hours, assigned_team) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+                    try (PreparedStatement ps = dbConnection.prepareStatement(sql)) {
+                        ps.setInt(1, t.getId());
+                        ps.setInt(2, t.getProjectId());
+                        ps.setString(3, t.getTitle());
+                        ps.setString(4, t.getDescription());
+                        if (t.getAssignedUserId() != null) ps.setInt(5, t.getAssignedUserId()); else ps.setNull(5, java.sql.Types.INTEGER);
+                        if (t.getParentTaskId() != null) ps.setInt(6, t.getParentTaskId()); else ps.setNull(6, java.sql.Types.INTEGER);
+                        ps.setString(7, t.getStatus().name());
+                        ps.setString(8, t.getPriority().name());
+                        ps.setDouble(9, t.getEstimatedHours());
+                        ps.setDouble(10, t.getLoggedHours());
+                        ps.setString(11, t.getAssignedTeam());
+                        ps.executeUpdate();
+                    }
+                } catch (SQLException e) {
+                    AppLogger.error("SQL error saving task #%d: %s", t.getId(), e.getMessage());
+                }
+            }
             return t;
         }
         public synchronized boolean deleteTask(int id) {
-            // Orphaned children or recursive deletes
-            return taskTable.removeIf(t -> t.getId() == id || (t.getParentTaskId() != null && t.getParentTaskId().equals(id)));
+            Set<Integer> taskIdsToDelete = new HashSet<>();
+            taskIdsToDelete.add(id);
+            boolean addedMore = true;
+            while (addedMore) {
+                addedMore = false;
+                for (Task t : taskTable) {
+                    if (t.getParentTaskId() != null && taskIdsToDelete.contains(t.getParentTaskId()) && !taskIdsToDelete.contains(t.getId())) {
+                        taskIdsToDelete.add(t.getId());
+                        addedMore = true;
+                    }
+                }
+            }
+            workLogs.removeIf(w -> taskIdsToDelete.contains(w.getTaskId()));
+            boolean removed = taskTable.removeIf(t -> taskIdsToDelete.contains(t.getId()));
+            if (isSqliteConnected && dbConnection != null) {
+                try {
+                    for (int tid : taskIdsToDelete) {
+                        try (PreparedStatement psLogs = dbConnection.prepareStatement("DELETE FROM work_logs WHERE task_id = ?;");
+                             PreparedStatement psTask = dbConnection.prepareStatement("DELETE FROM tasks WHERE id = ?;")) {
+                            psLogs.setInt(1, tid); psLogs.executeUpdate();
+                            psTask.setInt(1, tid); psTask.executeUpdate();
+                        }
+                    }
+                    AppLogger.info("Permanently deleted Task #%d (and sub-tasks: %s) from SQLite.", id, taskIdsToDelete);
+                } catch (SQLException e) {
+                    AppLogger.error("SQL error deleting task #%d: %s", id, e.getMessage());
+                }
+            }
+            return removed;
+        }
+
+        public synchronized TimeInSession recordLoginSession(User u) {
+            String sId = "SES-" + (sessionSequence++);
+            TimeInSession session = new TimeInSession(sId, u.getId(), u.getUsername(), u.getFullName(), u.getRole(), LocalDateTime.now());
+            sessionLogs.add(0, session);
+            this.currentActiveSession = session;
+            if (isSqliteConnected && dbConnection != null) {
+                try {
+                    String sql = "INSERT INTO sessions (session_id, user_id, username, full_name, role, time_in, time_out, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
+                    try (PreparedStatement ps = dbConnection.prepareStatement(sql)) {
+                        ps.setString(1, session.getSessionId());
+                        ps.setInt(2, session.getUserId());
+                        ps.setString(3, session.getUsername());
+                        ps.setString(4, session.getFullName());
+                        ps.setString(5, session.getRole().name());
+                        ps.setString(6, session.getTimeIn().toString());
+                        ps.setNull(7, java.sql.Types.VARCHAR);
+                        ps.setString(8, session.getStatus());
+                        ps.executeUpdate();
+                    }
+                } catch (SQLException e) {
+                    AppLogger.error("SQL error recording session: %s", e.getMessage());
+                }
+            }
+            return session;
+        }
+
+        public synchronized void recordLogoutSession(User u) {
+            TimeInSession target = null;
+            if (currentActiveSession != null && currentActiveSession.getUserId() == u.getId() && "ACTIVE".equals(currentActiveSession.getStatus())) {
+                currentActiveSession.setTimeOut(LocalDateTime.now());
+                target = currentActiveSession;
+                currentActiveSession = null;
+            } else {
+                for (TimeInSession s : sessionLogs) {
+                    if (s.getUserId() == u.getId() && "ACTIVE".equals(s.getStatus())) {
+                        s.setTimeOut(LocalDateTime.now());
+                        target = s;
+                        break;
+                    }
+                }
+            }
+            if (target != null && isSqliteConnected && dbConnection != null) {
+                try {
+                    String sql = "UPDATE sessions SET time_out = ?, status = ? WHERE session_id = ?;";
+                    try (PreparedStatement ps = dbConnection.prepareStatement(sql)) {
+                        ps.setString(1, target.getTimeOut().toString());
+                        ps.setString(2, target.getStatus());
+                        ps.setString(3, target.getSessionId());
+                        ps.executeUpdate();
+                    }
+                } catch (SQLException e) {
+                    AppLogger.error("SQL error updating logout session: %s", e.getMessage());
+                }
+            }
+        }
+
+        public synchronized void recordTaskWorkLog(Task task, Project project, User user, double hours, String notes) {
+            String wId = "LOG-" + (workLogSequence++);
+            String pName = project != null ? project.getTitle() : ("Project #" + task.getProjectId());
+            TaskWorkLog log = new TaskWorkLog(wId, task.getId(), task.getTitle(), pName, user.getId(), user.getFullName(), hours, LocalDateTime.now(), notes);
+            workLogs.add(0, log);
+            if (isSqliteConnected && dbConnection != null) {
+                try {
+                    String sqlUp = "UPDATE tasks SET logged_hours = ? WHERE id = ?;";
+                    try (PreparedStatement psUp = dbConnection.prepareStatement(sqlUp)) {
+                        psUp.setDouble(1, task.getLoggedHours());
+                        psUp.setInt(2, task.getId());
+                        psUp.executeUpdate();
+                    }
+                    String sql = "INSERT INTO work_logs (log_id, task_id, task_title, project_name, user_id, user_name, hours_logged, timestamp, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);";
+                    try (PreparedStatement ps = dbConnection.prepareStatement(sql)) {
+                        ps.setString(1, log.getLogId());
+                        ps.setInt(2, log.getTaskId());
+                        ps.setString(3, log.getTaskTitle());
+                        ps.setString(4, log.getProjectName());
+                        ps.setInt(5, log.getUserId());
+                        ps.setString(6, log.getUserName());
+                        ps.setDouble(7, log.getHoursLogged());
+                        ps.setString(8, log.getTimestamp().toString());
+                        ps.setString(9, log.getNotes());
+                        ps.executeUpdate();
+                    }
+                } catch (SQLException e) {
+                    AppLogger.error("SQL error recording task work log: %s", e.getMessage());
+                }
+            }
+        }
+
+        public synchronized List<TimeInSession> getSessionLogs() { return new ArrayList<>(sessionLogs); }
+        public synchronized List<TaskWorkLog> getWorkLogs() { return new ArrayList<>(workLogs);
+        }
+
+        private static class DriverShim implements Driver {
+            private final Driver driver;
+            DriverShim(Driver d) { this.driver = d; }
+            @Override public boolean acceptsURL(String u) throws SQLException { return driver.acceptsURL(u); }
+            @Override public Connection connect(String u, Properties p) throws SQLException { return driver.connect(u, p); }
+            @Override public int getMajorVersion() { return driver.getMajorVersion(); }
+            @Override public int getMinorVersion() { return driver.getMinorVersion(); }
+            @Override public DriverPropertyInfo[] getPropertyInfo(String u, Properties p) throws SQLException { return driver.getPropertyInfo(u, p); }
+            @Override public boolean jdbcCompliant() { return driver.jdbcCompliant(); }
+            @Override public java.util.logging.Logger getParentLogger() throws SQLFeatureNotSupportedException { return driver.getParentLogger(); }
         }
     }
 
@@ -783,6 +1608,8 @@ public class ProjectManagementSystem {
             Task task = db.getTasks().stream().filter(t -> t.getId() == taskId).findFirst().orElseThrow(() -> new TaskNotFoundException(taskId));
             task.logHours(hours);
             db.saveTask(task);
+            Project project = db.getProjects().stream().filter(p -> p.getId() == task.getProjectId()).findFirst().orElse(null);
+            db.recordTaskWorkLog(task, project, initiator, hours, "Engineering sprint task execution");
         }
 
         public void deleteTask(int taskId, User initiator) throws UnauthorizedAccessException, TaskNotFoundException {
@@ -828,7 +1655,7 @@ public class ProjectManagementSystem {
     }
 
     public static class TaskTableModelAdapter extends AbstractTableModel {
-        private final String[] columns = {"ID", "Task Title", "Project ID", "Priority", "Status", "Est. Hrs", "Logged Hrs", "Progress", "Depth"};
+        private final String[] columns = {"ID", "Task Title", "Project", "Assigned Team", "Priority", "Status", "Est. Hrs", "Logged Hrs", "Progress"};
         private final List<Task> tasks = new ArrayList<>();
 
         public void setTasks(List<Task> list) {
@@ -845,13 +1672,13 @@ public class ProjectManagementSystem {
             switch (col) {
                 case 0: return t.getId();
                 case 1: return t.getTitle();
-                case 2: return "#" + t.getProjectId();
-                case 3: return t.getPriority();
-                case 4: return t.getStatus();
-                case 5: return t.getEstimatedHours() + "h";
-                case 6: return t.getLoggedHours() + "h";
-                case 7: return t.calculateCompletionPercentage(); // Recursive
-                case 8: return "L" + t.calculateDependencyDepth(); // Recursive
+                case 2: return "Project #" + t.getProjectId();
+                case 3: return t.getAssignedTeam();
+                case 4: return t.getPriority();
+                case 5: return t.getStatus();
+                case 6: return t.getEstimatedHours() + "h";
+                case 7: return t.getLoggedHours() + "h";
+                case 8: return t.calculateCompletionPercentage();
                 default: return null;
             }
         }
@@ -890,39 +1717,50 @@ public class ProjectManagementSystem {
             return p;
         }
 
-        public static JButton createPrimaryButton(String text) {
-            JButton btn = new JButton(text);
+        public static void styleButton(JButton btn, Color bg, Color fg, Color border, Color hoverBg) {
+            btn.setUI(new javax.swing.plaf.basic.BasicButtonUI());
             btn.setFont(FONT_BOLD);
-            btn.setBackground(PRIMARY);
-            btn.setForeground(Color.WHITE);
+            btn.setBackground(bg);
+            btn.setForeground(fg);
+            btn.setOpaque(true);
+            btn.setContentAreaFilled(true);
             btn.setFocusPainted(false);
             btn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-            btn.setBorder(BorderFactory.createEmptyBorder(8, 16, 8, 16));
+            btn.setBorder(BorderFactory.createCompoundBorder(
+                    BorderFactory.createLineBorder(border, 1),
+                    BorderFactory.createEmptyBorder(8, 16, 8, 16)
+            ));
+            btn.addMouseListener(new MouseAdapter() {
+                @Override public void mouseEntered(MouseEvent e) {
+                    if (btn.isEnabled()) btn.setBackground(hoverBg);
+                }
+                @Override public void mouseExited(MouseEvent e) {
+                    btn.setBackground(bg);
+                }
+            });
+        }
+
+        public static JButton createPrimaryButton(String text) {
+            JButton btn = new JButton(text);
+            styleButton(btn, new Color(37, 99, 235), Color.WHITE, new Color(29, 78, 216), new Color(29, 78, 216));
             return btn;
         }
 
         public static JButton createSecondaryButton(String text) {
             JButton btn = new JButton(text);
-            btn.setFont(FONT_REGULAR);
-            btn.setBackground(Color.WHITE);
-            btn.setForeground(TEXT_DARK);
-            btn.setFocusPainted(false);
-            btn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-            btn.setBorder(BorderFactory.createCompoundBorder(
-                    BorderFactory.createLineBorder(BORDER, 1),
-                    BorderFactory.createEmptyBorder(7, 14, 7, 14)
-            ));
+            styleButton(btn, new Color(241, 245, 249), new Color(15, 23, 42), new Color(148, 163, 184), new Color(226, 232, 240));
             return btn;
         }
 
         public static JButton createDangerButton(String text) {
             JButton btn = new JButton(text);
-            btn.setFont(FONT_BOLD);
-            btn.setBackground(DANGER);
-            btn.setForeground(Color.WHITE);
-            btn.setFocusPainted(false);
-            btn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-            btn.setBorder(BorderFactory.createEmptyBorder(8, 16, 8, 16));
+            styleButton(btn, new Color(220, 38, 38), Color.WHITE, new Color(185, 28, 28), new Color(185, 28, 28));
+            return btn;
+        }
+
+        public static JButton createSuccessButton(String text) {
+            JButton btn = new JButton(text);
+            styleButton(btn, new Color(16, 185, 129), Color.WHITE, new Color(5, 150, 105), new Color(5, 150, 105));
             return btn;
         }
 
@@ -1021,7 +1859,7 @@ public class ProjectManagementSystem {
 
             JPanel header = new JPanel(new FlowLayout(FlowLayout.LEFT, 15, 12));
             header.setBackground(UITheme.PRIMARY);
-            JLabel lblH = new JLabel(project == null ? "📋 Enter New Project Details" : "✏️ Update Project Information");
+            JLabel lblH = new JLabel(project == null ? "Enter New Project Details" : "Update Project Information");
             lblH.setFont(UITheme.FONT_SECTION);
             lblH.setForeground(Color.WHITE);
             header.add(lblH);
@@ -1115,6 +1953,7 @@ public class ProjectManagementSystem {
         private JComboBox<ProjectItem> cmbProj = new JComboBox<>();
         private JComboBox<TaskItem> cmbParent = new JComboBox<>();
         private JTextField txtTitle = new JTextField(22);
+        private JComboBox<String> cmbTeam = new JComboBox<>();
         private JComboBox<UserItem> cmbUser = new JComboBox<>();
         private JComboBox<TaskPriority> cmbPriority = new JComboBox<>(TaskPriority.values());
         private JComboBox<TaskStatus> cmbStatus = new JComboBox<>(TaskStatus.values());
@@ -1127,14 +1966,22 @@ public class ProjectManagementSystem {
             this.task = taskToEdit;
 
             for (Project p : projects) cmbProj.addItem(new ProjectItem(p));
-            cmbParent.addItem(new TaskItem(null, "── None (Root / Top-Level Task) ──"));
+            cmbParent.addItem(new TaskItem(null, "[None] Root / Top-Level Task"));
             for (Task t : tasks) {
                 if (taskToEdit == null || !t.getId().equals(taskToEdit.getId())) {
-                    cmbParent.addItem(new TaskItem(t.getId(), "#" + t.getId() + " • " + t.getTitle()));
+                    cmbParent.addItem(new TaskItem(t.getId(), "#" + t.getId() + " | " + t.getTitle()));
                 }
             }
-            cmbUser.addItem(new UserItem(null, "── Unassigned ──"));
+            cmbUser.addItem(new UserItem(null, "[Unassigned]"));
             for (User u : users) cmbUser.addItem(new UserItem(u.getId(), u.getFullName() + " (" + u.getRole().getLabel() + ")"));
+
+            cmbTeam.addItem("General Team");
+            for (Team tm : DatabaseManager.getInstance().getTeams()) {
+                if (!"General Team".equalsIgnoreCase(tm.getName())) cmbTeam.addItem(tm.getName());
+            }
+            if (taskToEdit != null && taskToEdit.getAssignedTeam() != null) {
+                cmbTeam.setSelectedItem(taskToEdit.getAssignedTeam());
+            }
 
             // Project default
             if (defaultProjectId != null) {
@@ -1193,7 +2040,7 @@ public class ProjectManagementSystem {
 
             JPanel header = new JPanel(new FlowLayout(FlowLayout.LEFT, 15, 12));
             header.setBackground(UITheme.PRIMARY);
-            JLabel lblH = new JLabel(task == null ? "📌 Create New Task / Sub-task" : "✏️ Update Task #" + task.getId());
+            JLabel lblH = new JLabel(task == null ? "Create New Task / Sub-task" : "Update Task #" + task.getId());
             lblH.setFont(UITheme.FONT_SECTION);
             lblH.setForeground(Color.WHITE);
             header.add(lblH);
@@ -1256,11 +2103,14 @@ public class ProjectManagementSystem {
                 UserItem userItem = (UserItem) cmbUser.getSelectedItem();
                 Integer uid = userItem != null ? userItem.id : null;
 
+                String selectedTeam = (String) cmbTeam.getSelectedItem();
+                if (selectedTeam == null || selectedTeam.trim().isEmpty()) selectedTeam = "General Team";
                 if (task == null) {
                     createdTask = new Task.Builder(pid, title)
                             .description(txtDesc.getText().trim())
                             .parentTask(parentId)
                             .assignedUser(uid)
+                            .assignedTeam(selectedTeam)
                             .priority((TaskPriority) cmbPriority.getSelectedItem())
                             .status((TaskStatus) cmbStatus.getSelectedItem())
                             .estimatedHours(est)
@@ -1272,6 +2122,7 @@ public class ProjectManagementSystem {
                     task.setTitle(title);
                     task.setDescription(txtDesc.getText().trim());
                     task.setAssignedUserId(uid);
+                    task.setAssignedTeam(selectedTeam);
                     task.setPriority((TaskPriority) cmbPriority.getSelectedItem());
                     task.setStatus((TaskStatus) cmbStatus.getSelectedItem());
                     task.setEstimatedHours(est);
@@ -1300,7 +2151,7 @@ public class ProjectManagementSystem {
         private static class ProjectItem {
             final Project p;
             ProjectItem(Project p) { this.p = p; }
-            @Override public String toString() { return "#" + p.getId() + " • " + p.getTitle(); }
+            @Override public String toString() { return "#" + p.getId() + " | " + p.getTitle(); }
         }
         private static class TaskItem {
             final Integer id;
@@ -1319,11 +2170,82 @@ public class ProjectManagementSystem {
     /**
      * Modal Dialog to Add New Team Members (Manager / Admin Only).
      */
+
+    public static class TeamFormDialog extends JDialog {
+        private boolean saved = false;
+        private String teamName;
+        private String teamDescription;
+        private JTextField txtName = new JTextField(20);
+        private JTextArea txtDesc = new JTextArea(4, 20);
+
+        public TeamFormDialog(Frame parent, DatabaseManager db) {
+            super(parent, "Create New Functional Team", true);
+            setLayout(new BorderLayout());
+            getContentPane().setBackground(UITheme.BG_LIGHT);
+
+            JPanel header = new JPanel(new FlowLayout(FlowLayout.LEFT, 15, 12));
+            header.setBackground(UITheme.PRIMARY);
+            JLabel lblH = new JLabel("Add New Engineering / Business Team");
+            lblH.setFont(UITheme.FONT_SECTION);
+            lblH.setForeground(Color.WHITE);
+            header.add(lblH);
+            add(header, BorderLayout.NORTH);
+
+            JPanel form = new JPanel(new GridBagLayout());
+            form.setBackground(Color.WHITE);
+            form.setBorder(BorderFactory.createEmptyBorder(15, 20, 15, 20));
+            GridBagConstraints g = new GridBagConstraints();
+            g.insets = new Insets(6, 6, 6, 6);
+            g.fill = GridBagConstraints.HORIZONTAL;
+
+            g.gridx = 0; g.gridy = 0; form.add(new JLabel("Team Name: *"), g);
+            g.gridx = 1; form.add(txtName, g);
+
+            g.gridx = 0; g.gridy = 1; form.add(new JLabel("Description: *"), g);
+            g.gridx = 1; form.add(new JScrollPane(txtDesc), g);
+
+            add(form, BorderLayout.CENTER);
+
+            JPanel footer = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 10));
+            footer.setBackground(UITheme.BG_LIGHT);
+            JButton btnCancel = UITheme.createSecondaryButton("Cancel");
+            btnCancel.addActionListener(e -> dispose());
+            JButton btnSave = UITheme.createPrimaryButton("Create Team");
+            btnSave.addActionListener(e -> {
+                String nm = txtName.getText().trim();
+                String ds = txtDesc.getText().trim();
+                if (nm.isEmpty() || ds.isEmpty()) {
+                    JOptionPane.showMessageDialog(this, "Please enter both a team name and description.", "Validation Error", JOptionPane.WARNING_MESSAGE);
+                    return;
+                }
+                for (Team tm : db.getTeams()) {
+                    if (tm.getName().equalsIgnoreCase(nm)) {
+                        JOptionPane.showMessageDialog(this, "Team '" + nm + "' already exists!", "Duplicate Team", JOptionPane.WARNING_MESSAGE);
+                        return;
+                    }
+                }
+                teamName = nm;
+                teamDescription = ds;
+                saved = true;
+                dispose();
+            });
+            footer.add(btnCancel); footer.add(btnSave);
+            add(footer, BorderLayout.SOUTH);
+            pack();
+            setLocationRelativeTo(parent);
+            setResizable(false);
+        }
+        public boolean isSaved() { return saved; }
+        public String getTeamName() { return teamName; }
+        public String getTeamDescription() { return teamDescription; }
+    }
+
     public static class AddTeamMemberDialog extends JDialog {
         private boolean saved = false;
         private User createdUser;
 
-        private JComboBox<String> cmbRole = new JComboBox<>(new String[]{"Software Developer", "Project Manager"});
+        private JComboBox<String> cmbRole = new JComboBox<>();
+        private JComboBox<String> cmbTeamSelect = new JComboBox<>();
         private JTextField txtFullName = new JTextField(20);
         private JTextField txtUsername = new JTextField(20);
         private JPasswordField txtPassword = new JPasswordField(20);
@@ -1334,14 +2256,16 @@ public class ProjectManagementSystem {
         private JLabel lblSpec = new JLabel("Primary Tech Stack: *");
         private JLabel lblMetric = new JLabel("Hourly Billing Rate ($): *");
 
-        public AddTeamMemberDialog(Frame parent, DatabaseManager db) {
-            super(parent, "Add New Team Member (Admin Only)", true);
+        private final User currentUser;
+        public AddTeamMemberDialog(Frame parent, DatabaseManager db, User currentUser) {
+            super(parent, (currentUser != null && currentUser.hasPermission(Permission.MANAGE_ADMINS)) ? "Register New Account / Administrator" : "Register New Software Developer", true);
+            this.currentUser = currentUser;
             setLayout(new BorderLayout());
             getContentPane().setBackground(UITheme.BG_LIGHT);
 
             JPanel header = new JPanel(new FlowLayout(FlowLayout.LEFT, 15, 12));
             header.setBackground(UITheme.PRIMARY);
-            JLabel lblH = new JLabel("👥 Register New Team Member");
+            JLabel lblH = new JLabel("Register New Team Member");
             lblH.setFont(UITheme.FONT_SECTION);
             lblH.setForeground(Color.WHITE);
             header.add(lblH);
@@ -1355,8 +2279,17 @@ public class ProjectManagementSystem {
             g.insets = new Insets(5, 5, 5, 5);
             g.fill = GridBagConstraints.HORIZONTAL;
 
+            if (currentUser != null && currentUser.hasPermission(Permission.MANAGE_ADMINS)) {
+                cmbRole.addItem("Software Developer / User");
+                cmbRole.addItem("Project Manager / Admin");
+            } else {
+                cmbRole.addItem("Software Developer / User");
+            }
+            for (Team tm : db.getTeams()) cmbTeamSelect.addItem(tm.getName());
+            if (cmbTeamSelect.getItemCount() == 0) cmbTeamSelect.addItem("General Team");
+
             cmbRole.addActionListener(e -> {
-                if (cmbRole.getSelectedIndex() == 1) { // Manager
+                if ("Project Manager / Admin".equals(cmbRole.getSelectedItem())) { // Manager
                     lblSpec.setText("Assigned Department: *");
                     txtSpec.setText("Engineering Management");
                     lblMetric.setText("Budget Approval Limit ($): *");
@@ -1370,11 +2303,12 @@ public class ProjectManagementSystem {
             });
 
             int row = 0;
-            addRow(form, g, row++, "Team Role: *", cmbRole);
+            addRow(form, g, row++, "Account Role: *", cmbRole);
+            addRow(form, g, row++, "Functional Team: *", cmbTeamSelect);
             addRow(form, g, row++, "Full Name: *", txtFullName);
             addRow(form, g, row++, "Unique Username: *", txtUsername);
-            addRow(form, g, row++, "Initial Password: *", txtPassword);
-            addRow(form, g, row++, "Email Address: *", txtEmail);
+            addRow(form, g, row++, "Initial Password (min 8 chars): *", txtPassword);
+            addRow(form, g, row++, "Email Address (valid format): *", txtEmail);
             addRow(form, g, row++, lblSpec.getText(), txtSpec);
             addRow(form, g, row++, lblMetric.getText(), txtMetric);
 
@@ -1399,6 +2333,16 @@ public class ProjectManagementSystem {
                     return;
                 }
 
+                if (pw.length() < 8) {
+                    JOptionPane.showMessageDialog(this, "Password must be at least 8 characters long.", "Validation Error", JOptionPane.WARNING_MESSAGE);
+                    return;
+                }
+
+                if (!em.matches("^[A-Za-z0-9+_.-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$")) {
+                    JOptionPane.showMessageDialog(this, "Please enter a valid email address (e.g., user@domain.com).", "Validation Error", JOptionPane.WARNING_MESSAGE);
+                    return;
+                }
+
                 if (db.isUsernameTaken(un)) {
                     JOptionPane.showMessageDialog(this, "Username '" + un + "' is already taken! Choose another.", "Duplicate Username", JOptionPane.WARNING_MESSAGE);
                     return;
@@ -1413,7 +2357,7 @@ public class ProjectManagementSystem {
                     return;
                 }
 
-                if (cmbRole.getSelectedIndex() == 1) { // Manager
+                if ("Project Manager / Admin".equals(cmbRole.getSelectedItem())) { // Manager
                     createdUser = new Manager(null, un, pw, fn, em, spec, metricVal);
                 } else { // Developer
                     createdUser = new Developer(null, un, pw, fn, em, spec, metricVal);
@@ -1472,22 +2416,46 @@ public class ProjectManagementSystem {
         private JTable taskTable;
         private JComboBox<String> cmbProjectFilter;
 
+        // Tasks Team Filter
+        private JComboBox<String> cmbTeamFilter;
+
         // Team Panel Components
         private DefaultTableModel teamModel;
         private JTable teamTable;
+        private DefaultTableModel teamsTableModel;
+        private JTable teamsTable;
+
+        // Time Logs Components (Admin / Super Admin)
+        private DefaultTableModel sessionTableModel;
+        private JTable sessionTable;
+        private DefaultTableModel workLogTableModel;
+        private JTable workLogTable;
+        private JLabel lblTotalSessionsMetric, lblActiveSessionsMetric, lblTotalHoursMetric;
+        private JComboBox<String> cmbTimeLogUserFilter;
 
         public MainFrame(DatabaseManager db, User initialUser) {
-            super("KTU PBCST304 - Enterprise Project Management System");
+            super("Enterprise Project Management System");
             this.db = db;
             this.projectService = new ProjectService(db);
             this.taskService = new TaskService(db);
             this.currentUser = initialUser;
 
             initComponents();
-            setSize(1220, 800);
+            setSize(1240, 820);
             setMinimumSize(new Dimension(1040, 680));
             setLocationRelativeTo(null);
-            setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+            setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
+            addWindowListener(new WindowAdapter() {
+                @Override public void windowClosing(WindowEvent e) {
+                    int confirm = JOptionPane.showConfirmDialog(MainFrame.this,
+                            "Are you sure you want to exit the application?",
+                            "Confirm Exit", JOptionPane.YES_NO_OPTION);
+                    if (confirm == JOptionPane.YES_OPTION) {
+                        db.recordLogoutSession(currentUser);
+                        System.exit(0);
+                    }
+                }
+            });
         }
 
         private void initComponents() {
@@ -1501,10 +2469,10 @@ public class ProjectManagementSystem {
 
             JPanel leftHeader = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 0));
             leftHeader.setOpaque(false);
-            JLabel logo = new JLabel("🚀 PMS");
+            JLabel logo = new JLabel("PMS");
             logo.setFont(new Font("Segoe UI", Font.BOLD, 22));
             logo.setForeground(Color.WHITE);
-            JLabel title = new JLabel("APJ Abdul Kalam Technological University | PBCST304 OOP");
+            JLabel title = new JLabel("Enterprise Workforce & Project Governance Platform");
             title.setFont(UITheme.FONT_SMALL);
             title.setForeground(new Color(224, 231, 255));
             leftHeader.add(logo);
@@ -1519,23 +2487,28 @@ public class ProjectManagementSystem {
             lblUserBadge.setFont(UITheme.FONT_BOLD);
             lblUserBadge.setForeground(Color.WHITE);
 
-            JButton btnSwitch = new JButton("🔑 Switch Active User");
-            btnSwitch.setFont(UITheme.FONT_SMALL);
-            btnSwitch.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-            btnSwitch.addActionListener(e -> showSwitchUserDialog());
+            JButton btnLogout = UITheme.createDangerButton("Logout");
+            btnLogout.setFont(UITheme.FONT_BOLD);
+            btnLogout.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+            btnLogout.addActionListener(e -> handleLogout());
 
             rightHeader.add(lblUserBadge);
-            rightHeader.add(btnSwitch);
+            rightHeader.add(Box.createHorizontalStrut(8));
+            rightHeader.add(btnLogout);
             header.add(rightHeader, BorderLayout.EAST);
             add(header, BorderLayout.NORTH);
 
             // Tabs
             tabbedPane = new JTabbedPane();
             tabbedPane.setFont(UITheme.FONT_BOLD);
-            tabbedPane.addTab("📊 Executive Dashboard", createDashboardPanel());
-            tabbedPane.addTab("📁 Project Management", createProjectsPanel());
-            tabbedPane.addTab("📌 Tasks & WBS Hierarchy", createTasksPanel());
-            tabbedPane.addTab("👥 Team Members & Roles", createTeamPanel());
+            tabbedPane.addTab("Executive Dashboard", createDashboardPanel());
+            tabbedPane.addTab("Project Management", createProjectsPanel());
+            tabbedPane.addTab("Tasks & WBS Hierarchy", createTasksPanel());
+            tabbedPane.addTab("Team Members & Roles", createTeamPanel());
+
+            if (currentUser.hasPermission(Permission.VIEW_TIME_LOGS)) {
+                tabbedPane.addTab("User Time-In & Work Logs", createTimeLogsPanel());
+            }
 
             tabbedPane.addChangeListener(e -> refreshAllViews());
             add(tabbedPane, BorderLayout.CENTER);
@@ -1544,7 +2517,7 @@ public class ProjectManagementSystem {
             JPanel status = new JPanel(new BorderLayout());
             status.setBackground(Color.WHITE);
             status.setBorder(BorderFactory.createCompoundBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, UITheme.BORDER), new EmptyBorder(7, 20, 7, 20)));
-            JLabel lblStat = new JLabel("● Persistence Engine: Thread-Safe Singleton Active | MVC Architecture | Recursive Composite Pattern");
+            JLabel lblStat = new JLabel(db.getDatabaseStatusText());
             lblStat.setFont(UITheme.FONT_SMALL);
             lblStat.setForeground(UITheme.SUCCESS);
             status.add(lblStat, BorderLayout.WEST);
@@ -1583,7 +2556,7 @@ public class ProjectManagementSystem {
             // Left Card: Project Rollups
             JPanel progressSection = UITheme.createCard();
             progressSection.setLayout(new BorderLayout(0, 12));
-            JLabel lblPTitle = new JLabel("📈 Project Recursive Progress Tracking (Rollup from Sub-tasks)");
+            JLabel lblPTitle = new JLabel("Project Recursive Progress Tracking (Rollup from Sub-tasks)");
             lblPTitle.setFont(UITheme.FONT_SECTION);
             lblPTitle.setForeground(UITheme.TEXT_DARK);
             progressSection.add(lblPTitle, BorderLayout.NORTH);
@@ -1601,7 +2574,7 @@ public class ProjectManagementSystem {
             // Right Card: Workflow Distribution & System Overview
             JPanel summarySection = UITheme.createCard();
             summarySection.setLayout(new BorderLayout(0, 15));
-            JLabel lblSTitle = new JLabel("⚡ Task Workflow Distribution & System Health");
+            JLabel lblSTitle = new JLabel("Task Workflow Distribution & System Health");
             lblSTitle.setFont(UITheme.FONT_SECTION);
             lblSTitle.setForeground(UITheme.TEXT_DARK);
             summarySection.add(lblSTitle, BorderLayout.NORTH);
@@ -1614,10 +2587,10 @@ public class ProjectManagementSystem {
             lblReviewCount = new JLabel("In Review: 0");
             lblDoneCount = new JLabel("Completed: 0");
 
-            distroPanel.add(createWorkflowItem("📝 To Do (Pending Execution)", lblTodoCount, new Color(224, 231, 255), new Color(30, 64, 175)));
-            distroPanel.add(createWorkflowItem("⚙️ In Progress (Active Sprints)", lblProgCount, new Color(254, 243, 199), new Color(146, 64, 14)));
-            distroPanel.add(createWorkflowItem("🔍 In Review (Quality Assurance)", lblReviewCount, new Color(243, 232, 255), new Color(107, 33, 168)));
-            distroPanel.add(createWorkflowItem("✅ Completed (Delivered)", lblDoneCount, new Color(209, 250, 229), new Color(6, 95, 70)));
+            distroPanel.add(createWorkflowItem("To Do (Pending Execution)", lblTodoCount, new Color(224, 231, 255), new Color(30, 64, 175)));
+            distroPanel.add(createWorkflowItem("In Progress (Active Sprints)", lblProgCount, new Color(254, 243, 199), new Color(146, 64, 14)));
+            distroPanel.add(createWorkflowItem("In Review (Quality Assurance)", lblReviewCount, new Color(243, 232, 255), new Color(107, 33, 168)));
+            distroPanel.add(createWorkflowItem("Completed (Delivered)", lblDoneCount, new Color(209, 250, 229), new Color(6, 95, 70)));
             summarySection.add(distroPanel, BorderLayout.CENTER);
 
             splitCenter.add(summarySection);
@@ -1684,19 +2657,27 @@ public class ProjectManagementSystem {
             JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
             actions.setOpaque(false);
 
-            JButton btnNew = UITheme.createPrimaryButton("+ New Project");
-            btnNew.addActionListener(e -> handleNewProject());
+            if (currentUser.hasPermission(Permission.CREATE_PROJECT)) {
+                JButton btnNew = UITheme.createPrimaryButton("+ New Project");
+                btnNew.addActionListener(e -> handleNewProject());
+                actions.add(btnNew);
+            }
 
-            JButton btnEdit = UITheme.createSecondaryButton("✏️ Edit Project");
-            btnEdit.addActionListener(e -> handleEditProject());
+            if (currentUser.hasPermission(Permission.EDIT_PROJECT)) {
+                JButton btnEdit = UITheme.createSecondaryButton("Edit Project");
+                btnEdit.addActionListener(e -> handleEditProject());
+                actions.add(btnEdit);
+            }
 
-            JButton btnDel = UITheme.createDangerButton("🗑️ Delete Project");
-            btnDel.addActionListener(e -> handleDeleteProject());
+            if (currentUser.hasPermission(Permission.DELETE_PROJECT)) {
+                JButton btnDel = UITheme.createDangerButton("Delete Project");
+                btnDel.addActionListener(e -> handleDeleteProject());
+                actions.add(btnDel);
+            }
 
-            actions.add(btnNew);
-            actions.add(btnEdit);
-            actions.add(btnDel);
-            topBar.add(actions, BorderLayout.EAST);
+            if (actions.getComponentCount() > 0) {
+                topBar.add(actions, BorderLayout.EAST);
+            }
 
             panel.add(topBar, BorderLayout.NORTH);
 
@@ -1708,10 +2689,12 @@ public class ProjectManagementSystem {
             projectTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
             projectTable.getColumnModel().getColumn(4).setCellRenderer(UITheme.createStatusRenderer());
 
-            // Double click to edit
+            // Double click to edit (if permitted)
             projectTable.addMouseListener(new MouseAdapter() {
                 @Override public void mouseClicked(MouseEvent e) {
-                    if (e.getClickCount() == 2) handleEditProject();
+                    if (e.getClickCount() == 2 && currentUser.hasPermission(Permission.EDIT_PROJECT)) {
+                        handleEditProject();
+                    }
                 }
             });
 
@@ -1771,7 +2754,7 @@ public class ProjectManagementSystem {
 
             // Mandatory Warning Message before Deleting
             int confirm = JOptionPane.showConfirmDialog(this,
-                    String.format("⚠️ WARNING: Are you sure you want to permanently delete Project #%d '%s'?\n" +
+                    String.format("WARNING: Are you sure you want to permanently delete Project #%d '%s'?\n" +
                             "This action will also delete all associated nested tasks and work logs!",
                             p.getId(), p.getTitle()),
                     "Confirm Project Deletion",
@@ -1813,27 +2796,39 @@ public class ProjectManagementSystem {
             JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
             actions.setOpaque(false);
 
-            JButton btnNewTask = UITheme.createPrimaryButton("+ New Task / Sub-task");
-            btnNewTask.addActionListener(e -> handleNewTask());
+            if (currentUser.hasPermission(Permission.CREATE_TASK)) {
+                JButton btnNewTask = UITheme.createPrimaryButton("+ New Task / Sub-task");
+                btnNewTask.addActionListener(e -> handleNewTask());
+                actions.add(btnNewTask);
+            }
 
-            JButton btnEditTask = UITheme.createSecondaryButton("✏️ Edit Task");
-            btnEditTask.addActionListener(e -> handleEditTask());
+            if (currentUser.hasPermission(Permission.EDIT_TASK)) {
+                JButton btnEditTask = UITheme.createSecondaryButton("Edit Task");
+                btnEditTask.addActionListener(e -> handleEditTask());
+                actions.add(btnEditTask);
+            }
 
-            JButton btnStatus = UITheme.createSecondaryButton("⚡ Transition Status");
-            btnStatus.addActionListener(e -> handleTransitionStatus());
+            if (currentUser.hasPermission(Permission.UPDATE_TASK_STATUS)) {
+                JButton btnStatus = UITheme.createSecondaryButton("Transition Status");
+                btnStatus.addActionListener(e -> handleTransitionStatus());
+                actions.add(btnStatus);
+            }
 
-            JButton btnHours = UITheme.createSecondaryButton("⏱️ Log Hours");
-            btnHours.addActionListener(e -> handleLogHours());
+            if (currentUser.hasPermission(Permission.LOG_HOURS)) {
+                JButton btnHours = UITheme.createSecondaryButton("Log Hours");
+                btnHours.addActionListener(e -> handleLogHours());
+                actions.add(btnHours);
+            }
 
-            JButton btnDelTask = UITheme.createDangerButton("🗑️ Delete Task");
-            btnDelTask.addActionListener(e -> handleDeleteTask());
+            if (currentUser.hasPermission(Permission.DELETE_TASK)) {
+                JButton btnDelTask = UITheme.createDangerButton("Delete Task");
+                btnDelTask.addActionListener(e -> handleDeleteTask());
+                actions.add(btnDelTask);
+            }
 
-            actions.add(btnNewTask);
-            actions.add(btnEditTask);
-            actions.add(btnStatus);
-            actions.add(btnHours);
-            actions.add(btnDelTask);
-            topBar.add(actions, BorderLayout.EAST);
+            if (actions.getComponentCount() > 0) {
+                topBar.add(actions, BorderLayout.EAST);
+            }
 
             panel.add(topBar, BorderLayout.NORTH);
 
@@ -2002,7 +2997,7 @@ public class ProjectManagementSystem {
 
             // Mandatory Warning Message before Deleting
             int confirm = JOptionPane.showConfirmDialog(this,
-                    String.format("⚠️ WARNING: Are you sure you want to delete Task #%d '%s'?\n" +
+                    String.format("WARNING: Are you sure you want to delete Task #%d '%s'?\n" +
                             "Any associated nested sub-tasks will also be removed!",
                             t.getId(), t.getTitle()),
                     "Confirm Task Deletion",
@@ -2032,79 +3027,444 @@ public class ProjectManagementSystem {
             JPanel topBar = new JPanel(new BorderLayout());
             topBar.setOpaque(false);
 
-            JLabel heading = new JLabel("Engineering Team Roster & Polymorphic Profiles");
+            JPanel titles = new JPanel(new GridLayout(2, 1, 0, 2));
+            titles.setOpaque(false);
+            JLabel heading = new JLabel("Teams Directory & Organization Workforce");
             heading.setFont(UITheme.FONT_HEADER);
             heading.setForeground(UITheme.TEXT_DARK);
-            topBar.add(heading, BorderLayout.WEST);
+            JLabel sub = new JLabel(currentUser.hasPermission(Permission.MANAGE_USERS)
+                    ? "Admin and Super Admin can manage members and teams. Super Admin manages Administrators."
+                    : "Organization Workforce and Functional Teams Roster (View-only for Software Developers)");
+            sub.setFont(UITheme.FONT_SMALL);
+            sub.setForeground(UITheme.TEXT_MUTED);
+            titles.add(heading);
+            titles.add(sub);
+            topBar.add(titles, BorderLayout.WEST);
 
             JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
             actions.setOpaque(false);
 
-            JButton btnAddMember = UITheme.createPrimaryButton("+ Add Team Member");
-            btnAddMember.addActionListener(e -> handleAddTeamMember());
+            if (currentUser.hasPermission(Permission.MANAGE_USERS)) {
+                JButton btnAddMember = UITheme.createPrimaryButton("+ Add User");
+                btnAddMember.addActionListener(e -> handleAddTeamMember());
 
-            JButton btnSwitch = UITheme.createSecondaryButton("🔑 Switch Active Session to Selected");
-            btnSwitch.addActionListener(e -> {
-                int row = teamTable.getSelectedRow();
-                if (row >= 0) {
-                    List<User> users = db.getUsers();
-                    if (row < users.size()) {
-                        switchSessionTo(users.get(row));
-                    }
-                } else {
-                    JOptionPane.showMessageDialog(this, "Select a user from the table first.", "Selection Required", JOptionPane.INFORMATION_MESSAGE);
-                }
-            });
+                JButton btnDeleteUser = UITheme.createDangerButton("- Delete User");
+                btnDeleteUser.addActionListener(e -> handleDeleteUser());
 
-            actions.add(btnAddMember);
-            actions.add(btnSwitch);
-            topBar.add(actions, BorderLayout.EAST);
+                JButton btnAddTeam = UITheme.createSuccessButton("+ Add New Team");
+                btnAddTeam.addActionListener(e -> handleAddTeam());
 
+                JButton btnDeleteTeam = UITheme.createSecondaryButton("- Delete Team");
+                btnDeleteTeam.addActionListener(e -> handleDeleteTeam());
+
+                actions.add(btnAddMember);
+                actions.add(btnDeleteUser);
+                actions.add(btnAddTeam);
+                actions.add(btnDeleteTeam);
+                topBar.add(actions, BorderLayout.EAST);
+            }
             panel.add(topBar, BorderLayout.NORTH);
 
-            Vector<String> cols = new Vector<>(Arrays.asList("ID", "Full Name", "Username", "Role", "Department / Stack", "Rate / Limit", "Polymorphic Role Description"));
-            teamModel = new DefaultTableModel(cols, 0) {
+            // Split: Top Teams Table, Bottom Members Table
+            JPanel centerSplit = new JPanel(new GridLayout(2, 1, 0, 14));
+            centerSplit.setOpaque(false);
+
+            // 1. Teams Section
+            JPanel teamsCard = UITheme.createCard();
+            teamsCard.setLayout(new BorderLayout(0, 8));
+            JLabel lblTeamsHead = new JLabel("Registered Functional Teams (Departments / Squads)");
+            lblTeamsHead.setFont(UITheme.FONT_SECTION);
+            lblTeamsHead.setForeground(UITheme.TEXT_DARK);
+            teamsCard.add(lblTeamsHead, BorderLayout.NORTH);
+
+            Vector<String> tmCols = new Vector<>(Arrays.asList("Team ID", "Team Name", "Domain / Mission Description", "Active Tasks Assigned"));
+            teamsTableModel = new DefaultTableModel(tmCols, 0) {
                 @Override public boolean isCellEditable(int r, int c) { return false; }
             };
+            teamsTable = new JTable(teamsTableModel);
+            teamsTable.setRowHeight(32);
+            teamsTable.setFont(UITheme.FONT_REGULAR);
+            teamsTable.getTableHeader().setFont(UITheme.FONT_BOLD);
+            teamsTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+            teamsCard.add(new JScrollPane(teamsTable), BorderLayout.CENTER);
+            centerSplit.add(teamsCard);
 
+            // 2. Members Section
+            JPanel membersCard = UITheme.createCard();
+            membersCard.setLayout(new BorderLayout(0, 8));
+            JLabel lblMembersHead = new JLabel(currentUser.hasPermission(Permission.MANAGE_USERS)
+                    ? "Personnel & Role Roster (Select a user to Delete or View)"
+                    : "Personnel & Role Roster (Directory View)");
+            lblMembersHead.setFont(UITheme.FONT_SECTION);
+            lblMembersHead.setForeground(UITheme.TEXT_DARK);
+            membersCard.add(lblMembersHead, BorderLayout.NORTH);
+
+            Vector<String> memCols = new Vector<>(Arrays.asList("User ID", "Full Name", "Username", "Account Role", "Department / Tech Stack", "Rate / Budget Limit", "Role Profile"));
+            teamModel = new DefaultTableModel(memCols, 0) {
+                @Override public boolean isCellEditable(int r, int c) { return false; }
+            };
             teamTable = new JTable(teamModel);
-            teamTable.setRowHeight(34);
+            teamTable.setRowHeight(32);
             teamTable.setFont(UITheme.FONT_REGULAR);
             teamTable.getTableHeader().setFont(UITheme.FONT_BOLD);
             teamTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+            membersCard.add(new JScrollPane(teamTable), BorderLayout.CENTER);
+            centerSplit.add(membersCard);
 
-            JScrollPane scroll = new JScrollPane(teamTable);
-            scroll.setBorder(BorderFactory.createLineBorder(UITheme.BORDER));
-            panel.add(scroll, BorderLayout.CENTER);
+            panel.add(centerSplit, BorderLayout.CENTER);
             return panel;
         }
 
         private void handleAddTeamMember() {
-            // Admin only access restriction
-            if (currentUser.getRole() != UserRole.MANAGER) {
-                JOptionPane.showMessageDialog(this,
-                        "Access Denied: Only Project Managers (Administrators) have permission to recruit and add new team members.\n" +
-                                "Current Role: " + currentUser.getRole().getLabel(),
-                        "Unauthorized", JOptionPane.WARNING_MESSAGE);
+            if (!currentUser.hasPermission(Permission.MANAGE_USERS)) {
+                JOptionPane.showMessageDialog(this, "Access Denied: Only Administrators have permission to add new users.", "Unauthorized", JOptionPane.WARNING_MESSAGE);
                 return;
             }
-
-            AddTeamMemberDialog dialog = new AddTeamMemberDialog(this, db);
+            AddTeamMemberDialog dialog = new AddTeamMemberDialog(this, db, currentUser);
             dialog.setVisible(true);
             if (dialog.isSaved()) {
                 User u = dialog.getCreatedUser();
                 db.saveUser(u);
                 refreshAllViews();
-                JOptionPane.showMessageDialog(this, "Team member '" + u.getFullName() + "' (" + u.getRole().getLabel() + ") added successfully!", "Success", JOptionPane.INFORMATION_MESSAGE);
+                JOptionPane.showMessageDialog(this, "Account '" + u.getFullName() + "' (" + u.getRole().getLabel() + ") created successfully!", "Success", JOptionPane.INFORMATION_MESSAGE);
             }
         }
 
-        private void switchSessionTo(User u) {
-            this.currentUser = u;
-            lblUserBadge.setText(currentUser.getProfileBadgeText()); // Dynamic dispatch
-            refreshAllViews();
-            JOptionPane.showMessageDialog(this, String.format("Active session switched to: %s\nRole: %s\nDescription: %s",
-                    u.getFullName(), u.getRole().getLabel(), u.getRoleDescription()), "Session Switched", JOptionPane.INFORMATION_MESSAGE);
+        private void handleDeleteUser() {
+            if (!currentUser.hasPermission(Permission.MANAGE_USERS)) {
+                JOptionPane.showMessageDialog(this, "Access Denied: You do not have permission to delete users.", "Access Denied", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            int row = teamTable.getSelectedRow();
+            if (row < 0) {
+                JOptionPane.showMessageDialog(this, "Please select a user from the table to delete.", "Selection Required", JOptionPane.INFORMATION_MESSAGE);
+                return;
+            }
+            int userId = (Integer) teamModel.getValueAt(row, 0);
+            User targetUser = db.getUsers().stream().filter(u -> u.getId().equals(userId)).findFirst().orElse(null);
+            if (targetUser == null) {
+                JOptionPane.showMessageDialog(this, "User not found.", "Error", JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+            if (targetUser.getId().equals(currentUser.getId())) {
+                JOptionPane.showMessageDialog(this, "You cannot delete your own active account!", "Operation Denied", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            if (targetUser.getRole() == UserRole.SUPER_ADMIN) {
+                JOptionPane.showMessageDialog(this, "Access Denied: Super Administrator accounts are root accounts and cannot be deleted!", "Access Denied", JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+            if (targetUser.getRole() == UserRole.MANAGER) {
+                if (!currentUser.hasPermission(Permission.MANAGE_ADMINS)) {
+                    JOptionPane.showMessageDialog(this,
+                            "Access Denied: Only Super Administrators have permission to delete Admin (Project Manager) accounts!\n" +
+                            "Your Current Role: " + currentUser.getRole().getLabel(),
+                            "Super Admin Privilege Required", JOptionPane.WARNING_MESSAGE);
+                    return;
+                }
+            }
+            int confirm = JOptionPane.showConfirmDialog(this,
+                    String.format("WARNING: Are you sure you want to permanently delete user:\n\n" +
+                                  "  ID: #%d\n" +
+                                  "  Name: %s\n" +
+                                  "  Username: %s\n" +
+                                  "  Role: %s\n\n" +
+                                  "This user will be permanently deleted from the SQLite database.",
+                            targetUser.getId(), targetUser.getFullName(), targetUser.getUsername(), targetUser.getRole().getLabel()),
+                    "Confirm User Deletion",
+                    JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+            if (confirm == JOptionPane.YES_OPTION) {
+                db.deleteUser(targetUser.getId());
+                refreshAllViews();
+                JOptionPane.showMessageDialog(this, "User '" + targetUser.getFullName() + "' was successfully deleted from the database.", "User Deleted", JOptionPane.INFORMATION_MESSAGE);
+            }
+        }
+
+        private void handleAddTeam() {
+            if (!currentUser.hasPermission(Permission.MANAGE_USERS)) {
+                JOptionPane.showMessageDialog(this, "Access Denied: Only Administrators can create teams.", "Unauthorized", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            TeamFormDialog dlg = new TeamFormDialog(this, db);
+            dlg.setVisible(true);
+            if (dlg.isSaved()) {
+                Team tm = new Team(dlg.getTeamName(), dlg.getTeamDescription());
+                db.saveTeam(tm);
+                refreshAllViews();
+                JOptionPane.showMessageDialog(this, "Team '" + tm.getName() + "' created successfully!", "Team Added", JOptionPane.INFORMATION_MESSAGE);
+            }
+        }
+
+        private void handleDeleteTeam() {
+            if (!currentUser.hasPermission(Permission.MANAGE_USERS)) {
+                JOptionPane.showMessageDialog(this, "Access Denied: Only Administrators can delete teams.", "Unauthorized", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            int row = teamsTable.getSelectedRow();
+            if (row < 0) {
+                JOptionPane.showMessageDialog(this, "Please select a team from the Teams table to delete.", "Selection Required", JOptionPane.INFORMATION_MESSAGE);
+                return;
+            }
+            int tid = (Integer) teamsTableModel.getValueAt(row, 0);
+            Team tm = db.getTeams().stream().filter(t -> t.getId().equals(tid)).findFirst().orElse(null);
+            if (tm == null) return;
+            int confirm = JOptionPane.showConfirmDialog(this,
+                    "Are you sure you want to delete Team '" + tm.getName() + "'?\nAny associated tasks will be reassigned to 'General Team'.",
+                    "Confirm Team Deletion", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+            if (confirm == JOptionPane.YES_OPTION) {
+                db.deleteTeam(tid);
+                refreshAllViews();
+                JOptionPane.showMessageDialog(this, "Team '" + tm.getName() + "' was removed.", "Team Deleted", JOptionPane.INFORMATION_MESSAGE);
+            }
+        }
+
+        private JPanel createTimeLogsPanel() {
+            JPanel panel = new JPanel(new BorderLayout(0, 14));
+            panel.setBackground(UITheme.BG_LIGHT);
+            panel.setBorder(BorderFactory.createEmptyBorder(18, 20, 18, 20));
+
+            // Top Header & Controls
+            JPanel topBar = new JPanel(new BorderLayout());
+            topBar.setOpaque(false);
+
+            JPanel headerTextPanel = new JPanel(new GridLayout(2, 1, 0, 2));
+            headerTextPanel.setOpaque(false);
+            JLabel heading = new JLabel("User Time-In Sessions & Task Hours Audit");
+            heading.setFont(UITheme.FONT_HEADER);
+            heading.setForeground(UITheme.TEXT_DARK);
+            JLabel sub = new JLabel("Administrative visibility into user attendance, active login sessions, and work hours logged.");
+            sub.setFont(UITheme.FONT_SMALL);
+            sub.setForeground(UITheme.TEXT_MUTED);
+            headerTextPanel.add(heading);
+            headerTextPanel.add(sub);
+            topBar.add(headerTextPanel, BorderLayout.WEST);
+
+            JPanel controls = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
+            controls.setOpaque(false);
+
+            JLabel lblFilter = new JLabel("Filter by User:");
+            lblFilter.setFont(UITheme.FONT_BOLD);
+            cmbTimeLogUserFilter = new JComboBox<>();
+            cmbTimeLogUserFilter.addItem("All Users");
+            for (User u : db.getUsers()) {
+                cmbTimeLogUserFilter.addItem(u.getFullName() + " (" + u.getUsername() + ")");
+            }
+            cmbTimeLogUserFilter.addActionListener(e -> refreshTimeLogs());
+
+            JButton btnRefreshLogs = UITheme.createPrimaryButton("Refresh Logs");
+            btnRefreshLogs.addActionListener(e -> refreshTimeLogs());
+
+            JButton btnAuditSummary = UITheme.createSecondaryButton("Audit Summary");
+            btnAuditSummary.addActionListener(e -> showAuditSummaryDialog());
+
+            controls.add(lblFilter);
+            controls.add(cmbTimeLogUserFilter);
+            controls.add(btnRefreshLogs);
+            controls.add(btnAuditSummary);
+            topBar.add(controls, BorderLayout.EAST);
+
+            panel.add(topBar, BorderLayout.NORTH);
+
+            // Center Content: Top Metrics + 2 Tables (Sessions & Work Logs)
+            JPanel centerPanel = new JPanel(new BorderLayout(0, 12));
+            centerPanel.setOpaque(false);
+
+            // 3 KPI Cards
+            JPanel metricsGrid = new JPanel(new GridLayout(1, 3, 14, 0));
+            metricsGrid.setOpaque(false);
+            lblTotalSessionsMetric = new JLabel("0", SwingConstants.CENTER);
+            lblActiveSessionsMetric = new JLabel("0", SwingConstants.CENTER);
+            lblTotalHoursMetric = new JLabel("0.0h", SwingConstants.CENTER);
+
+            metricsGrid.add(createStatCard("TOTAL SESSIONS RECORDED", lblTotalSessionsMetric, UITheme.PRIMARY, "Login audit trails"));
+            metricsGrid.add(createStatCard("ACTIVE SESSIONS NOW", lblActiveSessionsMetric, UITheme.SUCCESS, "Currently logged in"));
+            metricsGrid.add(createStatCard("TOTAL WORK HOURS LOGGED", lblTotalHoursMetric, UITheme.PRIMARY_ACCENT, "Sprint task execution"));
+            centerPanel.add(metricsGrid, BorderLayout.NORTH);
+
+            // Split Tables: Sessions Table (Top) and Work Logs Table (Bottom)
+            JPanel tablesContainer = new JPanel(new GridLayout(2, 1, 0, 12));
+            tablesContainer.setOpaque(false);
+
+            // Section 1: User Login & Time-In Sessions
+            JPanel sessionSection = UITheme.createCard();
+            sessionSection.setLayout(new BorderLayout(0, 8));
+            JLabel lblSessionTitle = new JLabel("User Login & Time-In Sessions (Attendance & Presence)");
+            lblSessionTitle.setFont(UITheme.FONT_SECTION);
+            lblSessionTitle.setForeground(UITheme.TEXT_DARK);
+            sessionSection.add(lblSessionTitle, BorderLayout.NORTH);
+
+            Vector<String> sessionCols = new Vector<>(Arrays.asList(
+                    "Session ID", "Username", "Full Name", "Role", "Time-In (Login)", "Time-Out (Logout)", "Duration", "Session Status"
+            ));
+            sessionTableModel = new DefaultTableModel(sessionCols, 0) {
+                @Override public boolean isCellEditable(int r, int c) { return false; }
+            };
+            sessionTable = new JTable(sessionTableModel);
+            sessionTable.setRowHeight(30);
+            sessionTable.setFont(UITheme.FONT_REGULAR);
+            sessionTable.getTableHeader().setFont(UITheme.FONT_BOLD);
+            sessionTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+            sessionSection.add(new JScrollPane(sessionTable), BorderLayout.CENTER);
+            tablesContainer.add(sessionSection);
+
+            // Section 2: Task Work Logs
+            JPanel workLogSection = UITheme.createCard();
+            workLogSection.setLayout(new BorderLayout(0, 8));
+            JLabel lblWorkTitle = new JLabel("User Task Work Hours Logged (Task Activity Audit)");
+            lblWorkTitle.setFont(UITheme.FONT_SECTION);
+            lblWorkTitle.setForeground(UITheme.TEXT_DARK);
+            workLogSection.add(lblWorkTitle, BorderLayout.NORTH);
+
+            Vector<String> workCols = new Vector<>(Arrays.asList(
+                    "Log ID", "Team Member", "Task Title", "Project", "Hours Logged", "Timestamp", "Activity Notes"
+            ));
+            workLogTableModel = new DefaultTableModel(workCols, 0) {
+                @Override public boolean isCellEditable(int r, int c) { return false; }
+            };
+            workLogTable = new JTable(workLogTableModel);
+            workLogTable.setRowHeight(30);
+            workLogTable.setFont(UITheme.FONT_REGULAR);
+            workLogTable.getTableHeader().setFont(UITheme.FONT_BOLD);
+            workLogTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+            workLogSection.add(new JScrollPane(workLogTable), BorderLayout.CENTER);
+            tablesContainer.add(workLogSection);
+
+            centerPanel.add(tablesContainer, BorderLayout.CENTER);
+            panel.add(centerPanel, BorderLayout.CENTER);
+
+            return panel;
+        }
+
+        private void refreshTimeLogs() {
+            if (sessionTableModel == null || workLogTableModel == null) return;
+
+            List<TimeInSession> allSessions = db.getSessionLogs();
+            List<TaskWorkLog> allWorkLogs = db.getWorkLogs();
+
+            // Filter by user if selected
+            int filterIdx = (cmbTimeLogUserFilter != null) ? cmbTimeLogUserFilter.getSelectedIndex() : 0;
+            String filterUsername = null;
+            if (filterIdx > 0) {
+                List<User> users = db.getUsers();
+                if (filterIdx - 1 < users.size()) {
+                    filterUsername = users.get(filterIdx - 1).getUsername();
+                }
+            }
+
+            DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+            // Update Metrics
+            long totalSessions = allSessions.size();
+            long activeSessions = allSessions.stream().filter(s -> "ACTIVE".equals(s.getStatus())).count();
+            double totalHours = allWorkLogs.stream().mapToDouble(TaskWorkLog::getHoursLogged).sum();
+
+            lblTotalSessionsMetric.setText(String.valueOf(totalSessions));
+            lblActiveSessionsMetric.setText(String.valueOf(activeSessions));
+            lblTotalHoursMetric.setText(String.format("%.1fh", totalHours));
+
+            // Populate Sessions Table
+            Vector<Vector<Object>> sData = new Vector<>();
+            for (TimeInSession s : allSessions) {
+                if (filterUsername != null && !s.getUsername().equalsIgnoreCase(filterUsername)) continue;
+                Vector<Object> row = new Vector<>();
+                row.add(s.getSessionId());
+                row.add(s.getUsername());
+                row.add(s.getFullName());
+                row.add(s.getRole().getLabel());
+                row.add(s.getTimeIn().format(fmt));
+                row.add(s.getTimeOut() != null ? s.getTimeOut().format(fmt) : "[Active Now]");
+                row.add(s.getFormattedDuration());
+                row.add(s.getStatus());
+                sData.add(row);
+            }
+            sessionTableModel.setDataVector(sData, new Vector<>(Arrays.asList(
+                    "Session ID", "Username", "Full Name", "Role", "Time-In (Login)", "Time-Out (Logout)", "Duration", "Session Status"
+            )));
+            sessionTable.getColumnModel().getColumn(7).setCellRenderer(new DefaultTableCellRenderer() {
+                @Override public Component getTableCellRendererComponent(JTable table, Object val, boolean isSel, boolean hasFocus, int r, int c) {
+                    JLabel lbl = (JLabel) super.getTableCellRendererComponent(table, val, isSel, hasFocus, r, c);
+                    lbl.setHorizontalAlignment(SwingConstants.CENTER);
+                    lbl.setFont(UITheme.FONT_BADGE);
+                    lbl.setOpaque(true);
+                    if ("ACTIVE".equals(val)) {
+                        lbl.setBackground(new Color(209, 250, 229));
+                        lbl.setForeground(new Color(6, 95, 70));
+                    } else {
+                        lbl.setBackground(new Color(241, 245, 249));
+                        lbl.setForeground(new Color(71, 85, 105));
+                    }
+                    return lbl;
+                }
+            });
+
+            // Populate Work Logs Table
+            Vector<Vector<Object>> wData = new Vector<>();
+            for (TaskWorkLog w : allWorkLogs) {
+                if (filterUsername != null) {
+                    Optional<User> uOpt = db.getUsers().stream().filter(u -> u.getId().equals(w.getUserId())).findFirst();
+                    if (uOpt.isPresent() && !uOpt.get().getUsername().equalsIgnoreCase(filterUsername)) continue;
+                }
+                Vector<Object> row = new Vector<>();
+                row.add(w.getLogId());
+                row.add(w.getUserName());
+                row.add(w.getTaskTitle());
+                row.add(w.getProjectName());
+                row.add(String.format("%.1f hrs", w.getHoursLogged()));
+                row.add(w.getTimestamp().format(fmt));
+                row.add(w.getNotes());
+                wData.add(row);
+            }
+            workLogTableModel.setDataVector(wData, new Vector<>(Arrays.asList(
+                    "Log ID", "Team Member", "Task Title", "Project", "Hours Logged", "Timestamp", "Activity Notes"
+            )));
+        }
+
+        private void showAuditSummaryDialog() {
+            List<TimeInSession> sessions = db.getSessionLogs();
+            List<TaskWorkLog> workLogs = db.getWorkLogs();
+            long activeCount = sessions.stream().filter(s -> "ACTIVE".equals(s.getStatus())).count();
+            double totalHours = workLogs.stream().mapToDouble(TaskWorkLog::getHoursLogged).sum();
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("=====================================================\n");
+            sb.append("   EXECUTIVE AUDIT & TIME SUMMARY REPORT   \n");
+            sb.append("=====================================================\n\n");
+            sb.append(String.format("Generated By: %s [%s]\n", currentUser.getFullName(), currentUser.getRole().getLabel()));
+            sb.append(String.format("Generated At: %s\n\n", LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))));
+            sb.append(String.format("Total Login Sessions Recorded: %d\n", sessions.size()));
+            sb.append(String.format("Currently Active User Sessions: %d\n", activeCount));
+            sb.append(String.format("Total Task Work Hours Logged:  %.2f hours\n\n", totalHours));
+            sb.append("-----------------------------------------------------\n");
+            sb.append("User Work Breakdown:\n");
+            Map<String, Double> hoursByUser = new HashMap<>();
+            for (TaskWorkLog w : workLogs) {
+                hoursByUser.put(w.getUserName(), hoursByUser.getOrDefault(w.getUserName(), 0.0) + w.getHoursLogged());
+            }
+            for (Map.Entry<String, Double> entry : hoursByUser.entrySet()) {
+                sb.append(String.format(" | %-28s : %.1f hrs\n", entry.getKey(), entry.getValue()));
+            }
+            sb.append("=====================================================\n");
+
+            JTextArea txt = new JTextArea(sb.toString(), 16, 45);
+            txt.setFont(new Font("Consolas", Font.PLAIN, 12));
+            txt.setEditable(false);
+            JOptionPane.showMessageDialog(this, new JScrollPane(txt), "Audit Summary Report", JOptionPane.INFORMATION_MESSAGE);
+        }
+
+        private void handleLogout() {
+            int confirm = JOptionPane.showConfirmDialog(
+                    this,
+                    String.format("Are you sure you want to log out, %s?\n\nTo switch accounts or continue working, you must log in again.", currentUser.getFullName()),
+                    "Confirm Logout",
+                    JOptionPane.YES_NO_OPTION,
+                    JOptionPane.QUESTION_MESSAGE
+            );
+            if (confirm == JOptionPane.YES_OPTION) {
+                AppLogger.info("User '%s' logged out.", currentUser.getUsername());
+                db.recordLogoutSession(currentUser);
+                dispose();
+                SwingUtilities.invokeLater(() -> ProjectManagementSystem.showLoginAndLaunch(db));
+            }
         }
 
         // ---------------------------------------------------------------------
@@ -2139,7 +3499,7 @@ public class ProjectManagementSystem {
                 r.setOpaque(false);
                 r.setBorder(BorderFactory.createEmptyBorder(7, 0, 7, 0));
 
-                JLabel l = new JLabel(String.format("<html><b>#%d: %s</b> <font color='#64748B'>[%s • $%,.0f]</font></html>",
+                JLabel l = new JLabel(String.format("<html><b>#%d: %s</b> <font color='#64748B'>[%s | $%,.0f]</font></html>",
                         p.getId(), p.getTitle(), p.getStatus(), p.getBudget()));
                 l.setPreferredSize(new Dimension(320, 24));
                 l.setFont(UITheme.FONT_REGULAR);
@@ -2165,7 +3525,7 @@ public class ProjectManagementSystem {
             String prevSelected = (String) cmbProjectFilter.getSelectedItem();
             cmbProjectFilter.removeAllItems();
             cmbProjectFilter.addItem("All Projects (" + projs.size() + ")");
-            for (Project p : projs) cmbProjectFilter.addItem("#" + p.getId() + " • " + p.getTitle());
+            for (Project p : projs) cmbProjectFilter.addItem("#" + p.getId() + " | " + p.getTitle());
             if (prevSelected != null) cmbProjectFilter.setSelectedItem(prevSelected);
 
             applyTaskFilter();
@@ -2173,7 +3533,7 @@ public class ProjectManagementSystem {
             // 5. Build Perfect WBS Tree
             treeRoot.removeAllChildren();
             for (Project p : projs) {
-                DefaultMutableTreeNode pNode = new DefaultMutableTreeNode(String.format("📁 Project #%d: %s [%s]", p.getId(), p.getTitle(), p.getStatus()));
+                DefaultMutableTreeNode pNode = new DefaultMutableTreeNode(String.format("Project #%d: %s [%s]", p.getId(), p.getTitle(), p.getStatus()));
                 List<Task> roots = projectService.buildTaskHierarchy(p.getId());
                 for (Task rootTask : roots) {
                     pNode.add(buildTreeNodesRecursively(rootTask));
@@ -2191,7 +3551,11 @@ public class ProjectManagementSystem {
                 row.add(u.getFullName());
                 row.add(u.getUsername());
                 row.add(u.getRole().getLabel());
-                if (u instanceof Manager) {
+                if (u instanceof SuperAdmin) {
+                    SuperAdmin sa = (SuperAdmin) u;
+                    row.add(sa.getDepartment());
+                    row.add("Full Authority");
+                } else if (u instanceof Manager) {
                     Manager m = (Manager) u;
                     row.add(m.getDepartment());
                     row.add(String.format("Limit: $%,.2f", m.getBudgetApprovalLimit()));
@@ -2207,11 +3571,16 @@ public class ProjectManagementSystem {
                 data.add(row);
             }
             teamModel.setDataVector(data, new Vector<>(Arrays.asList("ID", "Full Name", "Username", "Role", "Department / Stack", "Rate / Limit", "Polymorphic Role Description")));
+
+            // 7. Time Logs (Admin / Super Admin Only)
+            if (currentUser.hasPermission(Permission.VIEW_TIME_LOGS)) {
+                refreshTimeLogs();
+            }
         }
 
         private void applyTaskFilter() {
             List<Task> all = taskService.getAllTasks();
-            int idx = cmbProjectFilter.getSelectedIndex();
+            int idx = cmbProjectFilter != null ? cmbProjectFilter.getSelectedIndex() : 0;
             if (idx > 0) {
                 List<Project> projs = projectService.getAllProjects();
                 if (idx - 1 < projs.size()) {
@@ -2219,32 +3588,21 @@ public class ProjectManagementSystem {
                     all.removeIf(t -> t.getProjectId() != pid);
                 }
             }
+            if (cmbTeamFilter != null && cmbTeamFilter.getSelectedIndex() > 0) {
+                String teamSel = (String) cmbTeamFilter.getSelectedItem();
+                all.removeIf(t -> !teamSel.equalsIgnoreCase(t.getAssignedTeam()));
+            }
             taskAdapter.setTasks(all);
         }
 
         private DefaultMutableTreeNode buildTreeNodesRecursively(Task t) {
-            String label = String.format("📋 #%d: %s [%s] (%.0f%% • Depth: L%d)",
+            String label = String.format("#%d: %s [%s] (%.0f%% | Depth: L%d)",
                     t.getId(), t.getTitle(), t.getStatus().getLabel(), t.calculateCompletionPercentage(), t.calculateDependencyDepth());
             DefaultMutableTreeNode node = new DefaultMutableTreeNode(new TaskNodeItem(t, label));
             for (Task child : t.getSubTasks()) {
                 node.add(buildTreeNodesRecursively(child)); // Recursive descent
             }
             return node;
-        }
-
-        private void showSwitchUserDialog() {
-            List<User> users = db.getUsers();
-            String[] names = users.stream().map(u -> u.getFullName() + " [" + u.getRole().getLabel() + "]").toArray(String[]::new);
-            String pick = (String) JOptionPane.showInputDialog(this, "Select active user profile for session:", "Role Switcher",
-                    JOptionPane.QUESTION_MESSAGE, null, names, names[0]);
-            if (pick != null) {
-                for (int i = 0; i < names.length; i++) {
-                    if (names[i].equals(pick)) {
-                        switchSessionTo(users.get(i));
-                        break;
-                    }
-                }
-            }
         }
 
         private static class TaskNodeItem {
@@ -2263,11 +3621,16 @@ public class ProjectManagementSystem {
         private final DatabaseManager db;
         private User authenticatedUser;
 
+        private JComboBox<String> cmbRoleSelect;
+        private JTextField txtUser;
+        private JPasswordField txtPass;
+
         public LoginDialog(Frame parent, DatabaseManager db) {
-            super(parent, "KTU PBCST304 - Login", true);
+            super(parent, "Enterprise Project Management - Login Portal", true);
             this.db = db;
             initComponents();
-            setSize(480, 340);
+            pack();
+            setSize(500, 360);
             setLocationRelativeTo(parent);
             setResizable(false);
         }
@@ -2282,7 +3645,7 @@ public class ProjectManagementSystem {
             JLabel t = new JLabel("Enterprise Project Management System");
             t.setFont(UITheme.FONT_HEADER);
             t.setForeground(Color.WHITE);
-            JLabel s = new JLabel("APJ Abdul Kalam Technological University | PBCST304 OOP");
+            JLabel s = new JLabel("Enterprise Project Management Portal");
             s.setFont(UITheme.FONT_SMALL);
             s.setForeground(new Color(224, 231, 255));
             banner.add(t, BorderLayout.NORTH);
@@ -2296,38 +3659,59 @@ public class ProjectManagementSystem {
             g.insets = new Insets(6, 6, 6, 6);
             g.fill = GridBagConstraints.HORIZONTAL;
 
+            // 1. Account Type Dropdown
             g.gridx = 0; g.gridy = 0;
-            form.add(new JLabel("Quick Demo Profile:"), g);
+            JLabel lblRole = new JLabel("Account Type: *");
+            lblRole.setFont(UITheme.FONT_BOLD);
+            form.add(lblRole, g);
 
             g.gridx = 1;
-            JComboBox<String> cmbQuick = new JComboBox<>(new String[]{
-                    "Select Demo Profile...",
-                    "Dr. Arun Kumar (Manager: admin)",
-                    "Alice George (Developer: dev_alice)",
-                    "Bob Varghese (Developer: dev_bob)"
+            cmbRoleSelect = new JComboBox<>(new String[]{
+                    "[Select Account Type]",
+                    "User (Software Developer)",
+                    "Admin (Project Manager)",
+                    "Super Admin (System Administrator)"
             });
-            form.add(cmbQuick, g);
+            cmbRoleSelect.setFont(UITheme.FONT_REGULAR);
+            form.add(cmbRoleSelect, g);
 
-            g.gridx = 0; g.gridy = 1;
-            form.add(new JLabel("Username:"), g);
+            // 2. Clean Instruction (NO USER MODE or credential disclosure)
+            g.gridx = 0; g.gridy = 1; g.gridwidth = 2;
+            JLabel lblInstr = new JLabel("Please select your account type and enter your credentials below.");
+            lblInstr.setFont(UITheme.FONT_SMALL);
+            lblInstr.setForeground(UITheme.TEXT_MUTED);
+            form.add(lblInstr, g);
+            g.gridwidth = 1;
+
+            // 3. Username Field (Starts empty)
+            g.gridx = 0; g.gridy = 2;
+            JLabel lblU = new JLabel("Username: *");
+            lblU.setFont(UITheme.FONT_BOLD);
+            form.add(lblU, g);
 
             g.gridx = 1;
-            JTextField txtUser = new JTextField("admin", 16);
+            txtUser = new JTextField(18);
+            txtUser.setFont(UITheme.FONT_REGULAR);
             form.add(txtUser, g);
 
-            g.gridx = 0; g.gridy = 2;
-            form.add(new JLabel("Password:"), g);
+            // 4. Password Field (Starts empty)
+            g.gridx = 0; g.gridy = 3;
+            JLabel lblP = new JLabel("Password: *");
+            lblP.setFont(UITheme.FONT_BOLD);
+            form.add(lblP, g);
 
             g.gridx = 1;
-            JPasswordField txtPass = new JPasswordField("admin123", 16);
+            txtPass = new JPasswordField(18);
+            txtPass.setFont(UITheme.FONT_REGULAR);
             form.add(txtPass, g);
 
-            cmbQuick.addActionListener(e -> {
-                int idx = cmbQuick.getSelectedIndex();
-                if (idx == 1) { txtUser.setText("admin"); txtPass.setText("admin123"); }
-                else if (idx == 2) { txtUser.setText("dev_alice"); txtPass.setText("alice123"); }
-                else if (idx == 3) { txtUser.setText("dev_bob"); txtPass.setText("bob123"); }
+            cmbRoleSelect.addActionListener(e -> {
+                txtUser.setText("");
+                txtPass.setText("");
+                txtUser.requestFocusInWindow();
             });
+
+            txtPass.addActionListener(e -> attemptLogin());
 
             add(form, BorderLayout.CENTER);
 
@@ -2335,36 +3719,98 @@ public class ProjectManagementSystem {
             actions.setBackground(UITheme.BG_LIGHT);
 
             JButton btnExit = UITheme.createSecondaryButton("Exit");
-            btnExit.addActionListener(e -> System.exit(0));
+            btnExit.addActionListener(e -> {
+                authenticatedUser = null;
+                dispose();
+            });
 
             JButton btnLogin = UITheme.createPrimaryButton("Sign In");
-            btnLogin.addActionListener(e -> {
-                String u = txtUser.getText().trim();
-                String p = new String(txtPass.getPassword());
-                Optional<User> auth = db.authenticate(u, p);
-                if (auth.isPresent()) {
-                    this.authenticatedUser = auth.get();
-                    dispose();
-                } else {
-                    JOptionPane.showMessageDialog(this, "Invalid credentials! Use the Quick Demo dropdown.", "Authentication Failed", JOptionPane.ERROR_MESSAGE);
-                }
-            });
+            btnLogin.addActionListener(e -> attemptLogin());
 
             actions.add(btnExit);
             actions.add(btnLogin);
             add(actions, BorderLayout.SOUTH);
         }
 
+        private void attemptLogin() {
+            int selectedIdx = cmbRoleSelect.getSelectedIndex();
+            if (selectedIdx <= 0) {
+                JOptionPane.showMessageDialog(this,
+                        "Please select your Account Type before signing in.",
+                        "Account Type Required", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+
+            String u = txtUser.getText().trim();
+            String p = new String(txtPass.getPassword());
+
+            if (u.isEmpty() || p.isEmpty()) {
+                JOptionPane.showMessageDialog(this,
+                        "Please enter both username and password.",
+                        "Input Required", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+
+            Optional<User> auth = db.authenticate(u, p);
+            if (!auth.isPresent()) {
+                JOptionPane.showMessageDialog(this,
+                        "Authentication Failed: Invalid username or password.",
+                        "Authentication Error", JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+
+            User user = auth.get();
+            boolean roleMatches = false;
+            String expectedType = "";
+
+            if (selectedIdx == 1) { // User (Developer)
+                expectedType = "User (Software Developer)";
+                roleMatches = (user.getRole() == UserRole.DEVELOPER);
+            } else if (selectedIdx == 2) { // Admin (Manager)
+                expectedType = "Admin (Project Manager)";
+                roleMatches = (user.getRole() == UserRole.MANAGER);
+            } else if (selectedIdx == 3) { // Super Admin
+                expectedType = "Super Admin (System Administrator)";
+                roleMatches = (user.getRole() == UserRole.SUPER_ADMIN);
+            }
+
+            if (!roleMatches) {
+                JOptionPane.showMessageDialog(this,
+                        String.format("Authentication Denied:\nAccount '%s' does not match the selected account type [%s].\nPlease select the correct account type matching your role.",
+                                u, expectedType),
+                        "Account Type Mismatch", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+
+            this.authenticatedUser = user;
+            dispose();
+        }
+
         public User getAuthenticatedUser() { return authenticatedUser; }
     }
 
     // =====================================================================================
-    // APPLICATION ENTRY POINT: MAIN METHOD
+    // APPLICATION ENTRY POINT: MAIN METHOD & SESSION LAUNCHER
     // =====================================================================================
+
+    public static void showLoginAndLaunch(DatabaseManager db) {
+        LoginDialog login = new LoginDialog(null, db);
+        login.setVisible(true);
+
+        User user = login.getAuthenticatedUser();
+        if (user != null) {
+            AppLogger.info("Authenticated successfully as: %s [%s]", user.getFullName(), user.getRole().getLabel());
+            db.recordLoginSession(user);
+            MainFrame frame = new MainFrame(db, user);
+            frame.setVisible(true);
+        } else {
+            System.exit(0);
+        }
+    }
 
     public static void main(String[] args) {
         System.out.println("=======================================================================");
-        System.out.println("  KTU PBCST304 - Project Management System (Production Standard)       ");
+        System.out.println("  Enterprise Project Management System (Production Standard)       ");
         System.out.println("=======================================================================");
 
         try {
@@ -2373,21 +3819,6 @@ public class ProjectManagementSystem {
 
         DatabaseManager db = DatabaseManager.getInstance();
 
-        SwingUtilities.invokeLater(new Runnable() {
-            @Override
-            public void run() {
-                LoginDialog login = new LoginDialog(null, db);
-                login.setVisible(true);
-
-                User user = login.getAuthenticatedUser();
-                if (user != null) {
-                    AppLogger.info("Authenticated successfully as: %s [%s]", user.getFullName(), user.getRole().getLabel());
-                    MainFrame frame = new MainFrame(db, user);
-                    frame.setVisible(true);
-                } else {
-                    System.exit(0);
-                }
-            }
-        });
+        SwingUtilities.invokeLater(() -> showLoginAndLaunch(db));
     }
 }

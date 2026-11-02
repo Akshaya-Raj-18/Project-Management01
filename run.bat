@@ -1,38 +1,52 @@
 @echo off
 setlocal
-echo ======================================================================
-echo   KTU PBCST304 - Project Management System (Enterprise Architecture)
-echo ======================================================================
+cd /d "%~dp0"
 
-REM Check Java
+echo ======================================================================
+echo   Enterprise Project Management System (PMS)
+echo ======================================================================
+echo.
+
+REM Verify Java installation
 java -version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [ERROR] Java is not installed or not in PATH. Please install JDK 17+.
+    echo [ERROR] Java is not installed or not in your system PATH.
+    echo Please install Java Development Kit (JDK 17 or higher).
     pause
     exit /b 1
 )
 
 REM Ensure bin directory exists
-if not exist "bin" mkdir bin
+if not exist "bin" mkdir "bin"
 
-REM Compile all sources
-echo [1/2] Compiling Java source files...
-dir /s /b src\*.java > sources.txt
-javac -encoding UTF-8 -cp "lib\sqlite-jdbc.jar;lib\slf4j-api.jar;lib\slf4j-simple.jar" -d bin @sources.txt
+REM Compile ProjectManagementSystem.java into bin directory
+echo [1/2] Compiling ProjectManagementSystem.java...
+javac -encoding UTF-8 -cp ".;lib\*" -d bin ProjectManagementSystem.java
 if %errorlevel% neq 0 (
+    echo.
     echo [ERROR] Compilation failed.
     pause
     exit /b 1
 )
-del sources.txt
 
-REM Launch Application
-echo [2/2] Launching PMS Graphical Application...
+echo [2/2] Launching Application...
 echo.
-echo Login Credentials:
-echo   - Manager:   admin      / admin123
-echo   - Developer: dev_alice  / alice123
-echo   - Developer: dev_bob    / bob123
+echo ======================================================================
+echo  DEFAULT LOGIN CREDENTIALS:
+echo   - Super Admin : superadmin / superadmin123
+echo   - Admin       : admin      / admin123
+echo   - User (Dev)  : user       / user1234
+echo   - Developer 1 : dev_alice  / alice123
+echo   - Developer 2 : dev_bob    / bob12345
+echo ======================================================================
 echo.
-java -cp "bin;lib\sqlite-jdbc.jar;lib\slf4j-api.jar;lib\slf4j-simple.jar" com.pms.Main %*
+
+java --enable-native-access=ALL-UNNAMED -cp "bin;lib\*" ProjectManagementSystem
+
+if %errorlevel% neq 0 (
+    echo.
+    echo [ERROR] Application terminated unexpectedly.
+    pause
+)
+
 endlocal
