@@ -97,3 +97,51 @@ Or directly via Java:
 javac -encoding UTF-8 -cp ".;lib\*" -d bin ProjectManagementSystem.java
 java --enable-native-access=ALL-UNNAMED -cp "bin;lib\*" ProjectManagementSystem
 ```
+
+---
+
+## KTU OOP Syllabus Topics Mapping (Course Code: PBCST304)
+
+The codebase strictly contains only the core Object-Oriented Programming topics defined in the **KTU PBCST304 OOP Syllabus**:
+
+### Module 1: Fundamentals, Types, Flow Control & Varargs
+* **Standard Java Structure & Types**: Explicit primitive type casting, wrapper types (`Integer`, `Double`).
+* **Arrays, Strings & Vectors**: Primitive arrays (`String[] tags`), `StringBuilder` for session audits, `Vector<Vector<Object>>` for Swing table models.
+* **Control Statements**: Multi-branch `switch` statements (in logging & badge rendering), conditional branching (`if-else`), iterative loops (`for`, `while`).
+* **Command Line Arguments**: `public static void main(String[] args)` supporting runtime CLI execution.
+* **Variable-Length Arguments (Varargs)**: `AppLogger.info(String format, Object... args)`, `AppLogger.debug(...)`, and `AppLogger.error(...)`.
+* **Abstract Classes & Interfaces**: `BaseEntity`, `User`, `Identifiable`, `Auditable`, `ProjectOperations`, `TaskOperations`.
+
+### Module 2: Core OOP Principles & Architecture
+* **Classes & Objects**: Domain modeling for `Project`, `Task`, `User`, `Team`, `TimeInSession`, and `TaskWorkLog`.
+* **Access Modifiers**: Strict encapsulation via `private`, package-level, and `protected` fields.
+* **Dynamic Use of `this`**: Instance variable resolution and method chaining in `Task.Builder`.
+* **Overloaded Constructors**: Default and parameterized constructor chains across all models.
+* **Method Overloading**: Overloaded utility methods and constructors with varying signatures.
+* **Recursion**:
+  * `calculateProjectCompletion(int projectId)`: Recursively aggregates progress across nested subtask trees.
+  * `buildTreeNodesRecursively(Task t)`: Recursively traverses and constructs the JTree Work Breakdown Structure (WBS).
+* **Static Members & Final Variables**: Thread-safe `static DatabaseManager getInstance()`, immutable constants in `UITheme`.
+* **Inner Classes & Anonymous Inner Classes**:
+  * Static inner classes: `Task.Builder`, `User.Credentials`.
+  * Anonymous inner classes: Custom `DefaultTableCellRenderer` widgets and Swing event listeners (`MouseAdapter`, `TreeSelectionListener`).
+* **Inheritance Hierarchy**: Abstract `User` superclass inherited by `SuperAdmin`, `Manager`, and `Developer`.
+* **Protected Members & `super` Keyword**: `super(...)` constructor chaining up the inheritance tree (`Developer` -> `User` -> `BaseEntity`).
+* **Method Overriding & Dynamic Method Dispatch**: Polymorphic invocation of `user.hasPermission(Permission)` and `user.getRoleDescription()`.
+
+### Module 3: Advanced Structure, Exceptions & Design Patterns
+* **Architectural Separation**: Clean multi-layer design (Model, Service, DAO, Adapter, View).
+* **Interface Inheritance**: `BaseEntity implements Identifiable, Auditable`.
+* **Exception Handling**: Robust `try-catch-finally` blocks and nested exception handling.
+* **Custom Exception Hierarchy**: `PMSException` base class extended by `ProjectNotFoundException`, `TaskNotFoundException`, `UnauthorizedAccessException`, `InvalidTaskStateException`, and `DatabaseOperationException`.
+* **Design Patterns**:
+  * **Singleton Pattern**: Synchronized, thread-safe `DatabaseManager.getInstance()`.
+  * **Adapter Pattern**: `ProjectTableModelAdapter` and `TaskTableModelAdapter` adapt domain collections to Swing `AbstractTableModel`.
+* **SOLID Principles**: Single Responsibility Principle (SRP), Open/Closed Principle (OCP), Liskov Substitution Principle (LSP), Interface Segregation Principle (ISP), and Dependency Inversion Principle (DIP).
+
+### Module 4: Event-Driven GUI (Java Swing) & Database Connectivity (JDBC)
+* **Swing Controls**: `JFrame`, `JTabbedPane`, `JPanel`, `JTable`, `JTree`, `JButton`, `JTextField`, `JPasswordField`, `JComboBox`, `JProgressBar`, `JScrollPane`, `JSplitPane`, `JOptionPane`.
+* **Layout Managers**: Dynamic responsive layouts using `BorderLayout`, `GridBagLayout`, `FlowLayout`, `GridLayout`, and `BoxLayout`.
+* **Delegation Event Model**: `ActionListener`, `MouseListener`, `TreeSelectionListener`, `WindowAdapter`, `KeyAdapter`.
+* **JDBC Database Connectivity**: Full CRUD operations executed using `Connection`, `PreparedStatement`, `ResultSet`, and transactional SQL statements with SQLite.
+
