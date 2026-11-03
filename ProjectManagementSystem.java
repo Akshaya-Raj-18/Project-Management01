@@ -346,6 +346,8 @@ public class ProjectManagementSystem {
 
         @Override public boolean hasPermission(Permission permission) {
             switch (permission) {
+                case CREATE_PROJECT:
+                case EDIT_PROJECT:
                 case UPDATE_TASK_STATUS:
                 case LOG_HOURS:
                 case CREATE_TASK:
@@ -781,7 +783,9 @@ public class ProjectManagementSystem {
                 } catch (Throwable t) {
                     File[] candidateJars = new File[]{
                             new File("lib/sqlite-jdbc.jar"),
+                            new File("sqlite-jdbc.jar"),
                             new File("C:/Users/User/Desktop/pms-app/lib/sqlite-jdbc.jar"),
+                            new File("C:/Users/User/Desktop/pms-app/sqlite-jdbc.jar"),
                             new File("C:/Users/User/Desktop/lib/sqlite-jdbc.jar")
                     };
                     for (File jar : candidateJars) {
@@ -1664,7 +1668,7 @@ public class ProjectManagementSystem {
     // =====================================================================================
 
     public static class ProjectTableModelAdapter extends AbstractTableModel {
-        private final String[] columns = {"ID", "Project Title", "Client Name", "Budget ($)", "Status", "Tags"};
+        private final String[] columns = {"ID", "Project Title", "Client Name", "Budget ($)", "Status", "Tags", "Description"};
         private final List<Project> projects = new ArrayList<>();
 
         public void setProjects(List<Project> list) {
@@ -1685,13 +1689,14 @@ public class ProjectManagementSystem {
                 case 3: return String.format("$%,.2f", p.getBudget());
                 case 4: return p.getStatus();
                 case 5: return p.getTagsFormatted();
+                case 6: return p.getDescription();
                 default: return null;
             }
         }
     }
 
     public static class TaskTableModelAdapter extends AbstractTableModel {
-        private final String[] columns = {"ID", "Task Title", "Project", "Assigned Team", "Priority", "Status", "Est. Hrs", "Logged Hrs", "Progress"};
+        private final String[] columns = {"ID", "Task Title", "Project", "Assigned Team", "Priority", "Status", "Est. Hrs", "Logged Hrs", "Progress", "Assigned Member", "Description"};
         private final List<Task> tasks = new ArrayList<>();
 
         public void setTasks(List<Task> list) {
@@ -1715,8 +1720,18 @@ public class ProjectManagementSystem {
                 case 6: return t.getEstimatedHours() + "h";
                 case 7: return t.getLoggedHours() + "h";
                 case 8: return t.calculateCompletionPercentage();
+                case 9: return getAssignedMemberName(t);
+                case 10: return t.getDescription();
                 default: return null;
             }
+        }
+
+        private String getAssignedMemberName(Task t) {
+            if (t.getAssignedUserId() == null) return "[Unassigned]";
+            for (User u : DatabaseManager.getInstance().getUsers()) {
+                if (u.getId() != null && u.getId().equals(t.getAssignedUserId())) return u.getFullName();
+            }
+            return "User #" + t.getAssignedUserId();
         }
     }
 
@@ -2458,8 +2473,9 @@ public class ProjectManagementSystem {
         private JTable taskTable;
         private JComboBox<String> cmbProjectFilter;
 
-        // Tasks Team Filter
+        // Tasks Team & User Filters
         private JComboBox<String> cmbTeamFilter;
+        private JComboBox<String> cmbTaskUserFilter;
 
         // Team Panel Components
         private DefaultTableModel teamModel;
@@ -2842,6 +2858,12 @@ public class ProjectManagementSystem {
             cmbTeamFilter.setFont(UITheme.FONT_REGULAR);
             cmbTeamFilter.addActionListener(e -> applyTaskFilter());
             filterArea.add(cmbTeamFilter);
+
+            filterArea.add(new JLabel("Member:"));
+            cmbTaskUserFilter = new JComboBox<>();
+            cmbTaskUserFilter.setFont(UITheme.FONT_REGULAR);
+            cmbTaskUserFilter.addActionListener(e -> applyTaskFilter());
+            filterArea.add(cmbTaskUserFilter);
             topBar.add(filterArea, BorderLayout.WEST);
 
             JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
@@ -2907,8 +2929,8 @@ public class ProjectManagementSystem {
             taskTable.setFont(UITheme.FONT_REGULAR);
             taskTable.getTableHeader().setFont(UITheme.FONT_BOLD);
             taskTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-            taskTable.getColumnModel().getColumn(4).setCellRenderer(UITheme.createStatusRenderer());
-            taskTable.getColumnModel().getColumn(7).setCellRenderer(UITheme.createProgressRenderer());
+            taskTable.getColumnModel().getColumn(5).setCellRenderer(UITheme.createStatusRenderer());
+            taskTable.getColumnModel().getColumn(8).setCellRenderer(UITheme.createProgressRenderer());
 
             taskTable.addMouseListener(new MouseAdapter() {
                 @Override public void mouseClicked(MouseEvent e) {
@@ -3461,14 +3483,10 @@ public class ProjectManagementSystem {
             List<TaskWorkLog> allWorkLogs = db.getWorkLogs();
 
             // Filter by user if selected
-            int filterIdx = (cmbTimeLogUserFilter != null) ? cmbTimeLogUserFilter.getSelectedIndex() : 0;
-            String filterUsername = null;
-            if (filterIdx > 0) {
-                List<User> users = db.getUsers();
-                if (filterIdx - 1 < users.size()) {
-                    filterUsername = users.get(filterIdx - 1).getUsername();
-                }
-            }
+            String selTimeUser = (cmbTimeLogUserFilter != null) ? (String) cmbTimeLogUserFilter.getSelectedItem() : null;
+            String filterUsername = (selTimeUser != null && !selTimeUser.equals("All Users") && selTimeUser.contains("(") && selTimeUser.endsWith(")"))
+                    ? selTimeUser.substring(selTimeUser.lastIndexOf('(') + 1, selTimeUser.length() - 1)
+                    : null;
 
             DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
@@ -3520,8 +3538,15 @@ public class ProjectManagementSystem {
             Vector<Vector<Object>> wData = new Vector<>();
             for (TaskWorkLog w : allWorkLogs) {
                 if (filterUsername != null) {
-                    Optional<User> uOpt = db.getUsers().stream().filter(u -> u.getId().equals(w.getUserId())).findFirst();
-                    if (uOpt.isPresent() && !uOpt.get().getUsername().equalsIgnoreCase(filterUsername)) continue;
+                    Optional<User> uOpt = db.getUsers().stream().filter(u -> u.getUsername().equalsIgnoreCase(filterUsername)).findFirst();
+                    if (uOpt.isPresent()) {
+                        int fUid = uOpt.get().getId();
+                        if (w.getUserId() != fUid && !w.getUserName().equalsIgnoreCase(uOpt.get().getFullName()) && !w.getUserName().equalsIgnoreCase(filterUsername)) {
+                            continue;
+                        }
+                    } else if (!w.getUserName().equalsIgnoreCase(filterUsername)) {
+                        continue;
+                    }
                 }
                 Vector<Object> row = new Vector<>();
                 row.add(w.getLogId());
@@ -3656,6 +3681,24 @@ public class ProjectManagementSystem {
                 if (prevTeam != null) cmbTeamFilter.setSelectedItem(prevTeam);
             }
 
+            if (cmbTaskUserFilter != null) {
+                String prevUser = (String) cmbTaskUserFilter.getSelectedItem();
+                cmbTaskUserFilter.removeAllItems();
+                cmbTaskUserFilter.addItem("All Members (" + users.size() + ")");
+                for (User u : users) cmbTaskUserFilter.addItem(u.getFullName() + " (" + u.getUsername() + ")");
+                if (prevUser != null) cmbTaskUserFilter.setSelectedItem(prevUser);
+            }
+
+            if (cmbTimeLogUserFilter != null) {
+                String curTimeUser = (String) cmbTimeLogUserFilter.getSelectedItem();
+                cmbTimeLogUserFilter.removeAllItems();
+                cmbTimeLogUserFilter.addItem("All Users");
+                for (User u : users) {
+                    cmbTimeLogUserFilter.addItem(u.getFullName() + " (" + u.getUsername() + ")");
+                }
+                if (curTimeUser != null) cmbTimeLogUserFilter.setSelectedItem(curTimeUser);
+            }
+
             applyTaskFilter();
 
             // 5. Build Perfect WBS Tree
@@ -3715,6 +3758,16 @@ public class ProjectManagementSystem {
             if (cmbTeamFilter != null && cmbTeamFilter.getSelectedIndex() > 0) {
                 String teamSel = (String) cmbTeamFilter.getSelectedItem();
                 all.removeIf(t -> !teamSel.equalsIgnoreCase(t.getAssignedTeam()));
+            }
+            if (cmbTaskUserFilter != null && cmbTaskUserFilter.getSelectedIndex() > 0) {
+                String uSel = (String) cmbTaskUserFilter.getSelectedItem();
+                if (uSel != null && uSel.contains("(") && uSel.endsWith(")")) {
+                    String uName = uSel.substring(uSel.lastIndexOf('(') + 1, uSel.length() - 1);
+                    User uObj = db.getUsers().stream().filter(u -> u.getUsername().equalsIgnoreCase(uName)).findFirst().orElse(null);
+                    if (uObj != null && uObj.getId() != null) {
+                        all.removeIf(t -> t.getAssignedUserId() == null || !t.getAssignedUserId().equals(uObj.getId()));
+                    }
+                }
             }
             taskAdapter.setTasks(all);
         }

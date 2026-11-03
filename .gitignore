@@ -12,5 +12,8 @@ Thumbs.db
 # Database temporary journals
 *.db-journal
 
+# Root temporary jars
+/sqlite-jdbc.jar
+
 # Keep libraries and source
 !lib/*.jar
